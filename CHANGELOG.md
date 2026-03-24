@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.87.0 (2026-03-24)
+
+Full Changelog: [v0.86.0...v0.87.0](https://github.com/anthropics/anthropic-sdk-python/compare/v0.86.0...v0.87.0)
+
+### Features
+
+* **client:** add error type field to APIStatusError ([#1587](https://github.com/anthropics/anthropic-sdk-python/issues/1587)) ([0dfb35e](https://github.com/anthropics/anthropic-sdk-python/commit/0dfb35e37457daf0a9707ff4304fcb04ddb5f6c9))
+
+
+### Bug Fixes
+
+* sanitize endpoint path params ([55db088](https://github.com/anthropics/anthropic-sdk-python/commit/55db088b4aa83f9eefa83862ec1439ae05fbb72b))
+* **transform schema:** support enums ([#1275](https://github.com/anthropics/anthropic-sdk-python/issues/1275)) ([8289533](https://github.com/anthropics/anthropic-sdk-python/commit/8289533921c64d17f7aa7690bfc0a3d18b84bb74))
+
+
+### Chores
+
+* **ci:** skip lint on metadata-only changes ([27012d2](https://github.com/anthropics/anthropic-sdk-python/commit/27012d2496a83ba9df65ed4c09b685ffebc67e9a))
+* **internal:** update gitignore ([e44886c](https://github.com/anthropics/anthropic-sdk-python/commit/e44886cd996ab22aae32debc6077d12e8ab6291c))
+* **tests:** bump steady to v0.19.4 ([89b74ab](https://github.com/anthropics/anthropic-sdk-python/commit/89b74ab60f5502617acacc918758d4504ba3d170))
+* **tests:** bump steady to v0.19.5 ([c86e10f](https://github.com/anthropics/anthropic-sdk-python/commit/c86e10f823f720a979ad7442a91114d8355618bc))
+* **tests:** bump steady to v0.19.6 ([4b072ff](https://github.com/anthropics/anthropic-sdk-python/commit/4b072ffaa1e1ae1b117e55c9a34843aa33271d52))
+* **tests:** bump steady to v0.19.7 ([5044ffb](https://github.com/anthropics/anthropic-sdk-python/commit/5044ffb9c0301341432d690a731d9135c0f56060))
+
 ## 0.86.0 (2026-03-18)
 
 Full Changelog: [v0.85.0...v0.86.0](https://github.com/anthropics/anthropic-sdk-python/compare/v0.85.0...v0.86.0)
