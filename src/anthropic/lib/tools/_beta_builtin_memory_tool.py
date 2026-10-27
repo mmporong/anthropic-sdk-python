@@ -176,8 +176,6 @@ class BetaAsyncAbstractMemoryTool(BetaAsyncBuiltinFunctionTool):
     Example usage:
 
     ```py
-    import asyncio
-
     from anthropic import AsyncAnthropic
 
 
@@ -193,17 +191,13 @@ class BetaAsyncAbstractMemoryTool(BetaAsyncBuiltinFunctionTool):
         # ... implement other abstract methods
 
 
-    async def main() -> None:
-        client = AsyncAnthropic()
-        memory_tool = MyMemoryTool()
-        message = await client.beta.messages.run_tools(
-            model="claude-sonnet-5-5",
-            messages=[{"role": "user", "content": "Remember that I like coffee"}],
-            tools=[memory_tool],
-        ).until_done()
-
-
-    asyncio.run(main())
+    client = AsyncAnthropic()
+    memory_tool = MyMemoryTool()
+    message = await client.beta.messages.run_tools(
+        model="claude-sonnet-5-5",
+        messages=[{"role": "user", "content": "Remember that I like coffee"}],
+        tools=[memory_tool],
+    ).until_done()
     ```
     """
 
