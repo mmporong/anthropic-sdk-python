@@ -1,4 +1,4 @@
-#!/usr/bin/env -S poetry run python
+#!/usr/bin/env -S uv run python
 
 # Note: you must have installed `anthropic` with the `bedrock` extra
 # e.g. `pip install -U anthropic[bedrock]`
@@ -19,7 +19,7 @@ message = client.messages.create(
             "content": "Hello!",
         }
     ],
-    model="anthropic.claude-sonnet-4-5-20250929-v1:0",
+    model="global.anthropic.claude-sonnet-5-5",
 )
 print(message.model_dump_json(indent=2))
 
@@ -33,7 +33,7 @@ with client.messages.stream(
             "content": "Say hello there!",
         }
     ],
-    model="anthropic.claude-sonnet-4-5-20250929-v1:0",
+    model="global.anthropic.claude-sonnet-5-5",
 ) as stream:
     for text in stream.text_stream:
         print(text, end="", flush=True)

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from ... import _legacy_response
 from ..._compat import cached_property
 from ..._resource import SyncAPIResource, AsyncAPIResource
-from ..._response import to_streamed_response_wrapper, async_to_streamed_response_wrapper
+from ..._response import (
+    to_raw_response_wrapper,
+    to_streamed_response_wrapper,
+    async_to_raw_response_wrapper,
+    async_to_streamed_response_wrapper,
+)
 from ...resources.beta import Messages as FirstPartyMessagesAPI, AsyncMessages as FirstPartyAsyncMessagesAPI
 
 __all__ = ["Messages", "AsyncMessages"]
@@ -13,7 +17,10 @@ __all__ = ["Messages", "AsyncMessages"]
 
 class Messages(SyncAPIResource):
     create = FirstPartyMessagesAPI.create
+    parse = FirstPartyMessagesAPI.parse
     stream = FirstPartyMessagesAPI.stream
+    tool_runner = FirstPartyMessagesAPI.tool_runner
+    thread = FirstPartyMessagesAPI.thread
     count_tokens = FirstPartyMessagesAPI.count_tokens
 
     @cached_property
@@ -22,7 +29,7 @@ class Messages(SyncAPIResource):
         This property can be used as a prefix for any HTTP method call to return the
         the raw response object instead of the parsed content.
 
-        For more information, see https://www.github.com/anthropics/anthropic-sdk-python#accessing-raw-response-data-eg-headers
+        For more information, see https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/python#accessing-raw-response-data-for-example-headers
         """
         return MessagesWithRawResponse(self)
 
@@ -31,14 +38,17 @@ class Messages(SyncAPIResource):
         """
         An alternative to `.with_raw_response` that doesn't eagerly read the response body.
 
-        For more information, see https://www.github.com/anthropics/anthropic-sdk-python#with_streaming_response
+        For more information, see https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/python#streaming-response-body
         """
         return MessagesWithStreamingResponse(self)
 
 
 class AsyncMessages(AsyncAPIResource):
     create = FirstPartyAsyncMessagesAPI.create
+    parse = FirstPartyAsyncMessagesAPI.parse
     stream = FirstPartyAsyncMessagesAPI.stream
+    tool_runner = FirstPartyAsyncMessagesAPI.tool_runner
+    thread = FirstPartyAsyncMessagesAPI.thread
     count_tokens = FirstPartyAsyncMessagesAPI.count_tokens
 
     @cached_property
@@ -47,7 +57,7 @@ class AsyncMessages(AsyncAPIResource):
         This property can be used as a prefix for any HTTP method call to return the
         the raw response object instead of the parsed content.
 
-        For more information, see https://www.github.com/anthropics/anthropic-sdk-python#accessing-raw-response-data-eg-headers
+        For more information, see https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/python#accessing-raw-response-data-for-example-headers
         """
         return AsyncMessagesWithRawResponse(self)
 
@@ -56,7 +66,7 @@ class AsyncMessages(AsyncAPIResource):
         """
         An alternative to `.with_raw_response` that doesn't eagerly read the response body.
 
-        For more information, see https://www.github.com/anthropics/anthropic-sdk-python#with_streaming_response
+        For more information, see https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/python#streaming-response-body
         """
         return AsyncMessagesWithStreamingResponse(self)
 
@@ -65,7 +75,7 @@ class MessagesWithRawResponse:
     def __init__(self, messages: Messages) -> None:
         self._messages = messages
 
-        self.create = _legacy_response.to_raw_response_wrapper(
+        self.create = to_raw_response_wrapper(
             messages.create,
         )
 
@@ -74,7 +84,7 @@ class AsyncMessagesWithRawResponse:
     def __init__(self, messages: AsyncMessages) -> None:
         self._messages = messages
 
-        self.create = _legacy_response.async_to_raw_response_wrapper(
+        self.create = async_to_raw_response_wrapper(
             messages.create,
         )
 

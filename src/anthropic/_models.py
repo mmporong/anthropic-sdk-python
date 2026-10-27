@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import sys
+import types
 import inspect
 import weakref
 from typing import (
@@ -8,8 +10,10 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Type,
+    Tuple,
     Union,
     Generic,
+    Mapping,
     TypeVar,
     Callable,
     Iterable,
@@ -25,7 +29,9 @@ from typing_extensions import (
     ClassVar,
     Protocol,
     Required,
+    Annotated,
     ParamSpec,
+    TypeAlias,
     TypedDict,
     TypeGuard,
     final,
@@ -48,7 +54,6 @@ from ._types import (
     HttpxRequestFiles,
 )
 from ._utils import (
-    PropertyInfo,
     is_list,
     is_given,
     json_safe,
@@ -79,7 +84,19 @@ from ._compat import (
 from ._constants import RAW_RESPONSE_HEADER
 
 if TYPE_CHECKING:
+    from pydantic import GetCoreSchemaHandler, ValidatorFunctionWrapHandler
+    from pydantic_core import CoreSchema, core_schema
+    from opentelemetry.util.types import AttributeValue
     from pydantic_core.core_schema import ModelField, ModelSchema, LiteralSchema, ModelFieldsSchema
+else:
+    try:
+        from pydantic_core import CoreSchema, core_schema
+    except ImportError:
+        CoreSchema = None
+        core_schema = None
+
+    # pydantic can't resolve the forward reference that this alias can hold, and request options are never validated.
+    AttributeValue = Any
 
 __all__ = ["BaseModel", "GenericModel"]
 
@@ -124,6 +141,12 @@ class BaseModel(pydantic.BaseModel):
         Note: unlike other properties that use an `_` prefix, this property
         *is* public. Unless documented otherwise, all other `_` prefix properties,
         methods and modules are *private*.
+        """
+
+        _workspace_id: Optional[str] = None
+        """The ID of the workspace the request was made in, returned via the `anthropic-workspace-id` header.
+        Like `_request_id`, this will **only** be set for the top-level response object and,
+        despite the `_` prefix, *is* public.
         """
 
     def to_dict(
@@ -412,6 +435,76 @@ class BaseModel(pydantic.BaseModel):
             )
 
 
+class _EagerIterable(list[_T], Generic[_T]):
+    """
+    Accepts any Iterable[T] input (including generators), consumes it
+    eagerly, and validates all items upfront.
+
+    Validation preserves the original container type where possible
+    (e.g. a set[T] stays a set[T]).  Serialization (model_dump / JSON)
+    always emits a list — round-tripping through model_dump() will not
+    restore the original container type.
+    """
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source_type: Any,
+        handler: GetCoreSchemaHandler,
+    ) -> CoreSchema:
+        (item_type,) = get_args(source_type) or (Any,)
+        item_schema: CoreSchema = handler.generate_schema(item_type)
+        list_of_items_schema: CoreSchema = core_schema.list_schema(item_schema)
+
+        return core_schema.no_info_wrap_validator_function(
+            cls._validate,
+            list_of_items_schema,
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                cls._serialize,
+                info_arg=False,
+            ),
+        )
+
+    @staticmethod
+    def _validate(v: Iterable[_T], handler: "ValidatorFunctionWrapHandler") -> Any:
+        original_type: type[Any] = type(v)
+
+        # Normalize to list so list_schema can validate each item
+        if isinstance(v, list):
+            items: list[_T] = v
+        else:
+            try:
+                items = list(v)
+            except TypeError as e:
+                raise TypeError("Value is not iterable") from e
+
+        # Validate items against the inner schema
+        validated: list[_T] = handler(items)
+
+        # Reconstruct original container type
+        if original_type is list:
+            return validated
+        # str(list) produces the list's repr, not a string built from items,
+        # so skip reconstruction for str and its subclasses.
+        if issubclass(original_type, str):
+            return validated
+        try:
+            return original_type(validated)
+        except (TypeError, ValueError):
+            # If the type cannot be reconstructed, just return the validated list
+            return validated
+
+    @staticmethod
+    def _serialize(v: Iterable[_T]) -> list[_T]:
+        """Always serialize as a list so Pydantic's JSON encoder is happy."""
+        if isinstance(v, list):
+            return v
+        return list(v)
+
+
+EagerIterable: TypeAlias = Annotated[Iterable[_T], _EagerIterable]
+
+
 def _construct_field(value: object, field: FieldInfo, key: str) -> object:
     if value is None:
         return field_get_default(field)
@@ -615,12 +708,41 @@ def construct_type(*, value: object, type_: object, metadata: Optional[List[Any]
     return value
 
 
+class UnionDiscriminator:
+    """Annotated metadata naming the field that tells the variants of a union apart, e.g.
+
+    ```py
+    Pet: TypeAlias = Annotated[Union[Cat, Dog], UnionDiscriminator("type")]
+    ```
+
+    When constructing a `Pet` from a response, the `type` value picks which variant to build.
+    """
+
+    field_name: str
+    """The discriminator field's attribute name on the variant classes (not its API alias), e.g. `type`"""
+
+    def __init__(self, field_name: str) -> None:
+        self.field_name = field_name
+
+    @override
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({self.field_name!r})"
+
+
 @runtime_checkable
 class CachedDiscriminatorType(Protocol):
     __discriminator__: DiscriminatorDetails
 
 
 DISCRIMINATOR_CACHE: weakref.WeakKeyDictionary[type, DiscriminatorDetails] = weakref.WeakKeyDictionary()
+
+
+def _discriminator_cache_key(union: type) -> type:
+    if sys.version_info < (3, 14) and isinstance(cast(object, union), types.UnionType):
+        # `X | Y` can't be weakly referenced before Python 3.14, so key on the equal `typing.Union[X, Y]`.
+        # That object may be held only by `typing`'s LRU cache, so the cache entry can be dropped and rebuilt.
+        return cast(type, cast(Any, Union)[get_args(union)])
+    return union
 
 
 class DiscriminatorDetails:
@@ -665,15 +787,16 @@ class DiscriminatorDetails:
 
 
 def _build_discriminated_union_meta(*, union: type, meta_annotations: tuple[Any, ...]) -> DiscriminatorDetails | None:
-    cached = DISCRIMINATOR_CACHE.get(union)
+    key = _discriminator_cache_key(union)
+    cached = DISCRIMINATOR_CACHE.get(key)
     if cached is not None:
         return cached
 
     discriminator_field_name: str | None = None
 
     for annotation in meta_annotations:
-        if isinstance(annotation, PropertyInfo) and annotation.discriminator is not None:
-            discriminator_field_name = annotation.discriminator
+        if isinstance(annotation, UnionDiscriminator):
+            discriminator_field_name = annotation.field_name
             break
 
     if not discriminator_field_name:
@@ -708,7 +831,7 @@ def _build_discriminated_union_meta(*, union: type, meta_annotations: tuple[Any,
                 field_schema = field["schema"]
 
                 if field_schema["type"] == "literal":
-                    for entry in cast("LiteralSchema", field_schema)["expected"]:
+                    for entry in cast("LiteralSchema", field_schema)["expected"]:  # pyright: ignore[reportUnnecessaryCast]
                         if isinstance(entry, str):
                             mapping[entry] = variant
 
@@ -720,7 +843,7 @@ def _build_discriminated_union_meta(*, union: type, meta_annotations: tuple[Any,
         discriminator_field=discriminator_field_name,
         discriminator_alias=discriminator_alias,
     )
-    DISCRIMINATOR_CACHE.setdefault(union, details)
+    DISCRIMINATOR_CACHE.setdefault(key, details)
     return details
 
 
@@ -732,12 +855,12 @@ def _extract_field_schema_pv2(model: type[BaseModel], field_name: str) -> ModelF
     if schema["type"] != "model":
         return None
 
-    schema = cast("ModelSchema", schema)
+    schema = cast("ModelSchema", schema)  # pyright: ignore[reportUnnecessaryCast]
     fields_schema = schema["schema"]
     if fields_schema["type"] != "model-fields":
         return None
 
-    fields_schema = cast("ModelFieldsSchema", fields_schema)
+    fields_schema = cast("ModelFieldsSchema", fields_schema)  # pyright: ignore[reportUnnecessaryCast]
     field = fields_schema["fields"].get(field_name)
     if not field:
         return None
@@ -761,19 +884,21 @@ def set_pydantic_config(typ: Any, config: pydantic.ConfigDict) -> None:
     setattr(typ, "__pydantic_config__", config)  # noqa: B010
 
 
-def add_request_id(obj: BaseModel, request_id: str | None) -> None:
+def add_response_ids(obj: BaseModel, *, request_id: str | None, workspace_id: str | None) -> None:
     obj._request_id = request_id
+    obj._workspace_id = workspace_id
 
-    # in Pydantic v1, using setattr like we do above causes the attribute
+    # in Pydantic v1, using setattr like we do above causes the attributes
     # to be included when serializing the model which we don't want in this
-    # case so we need to explicitly exclude it
+    # case so we need to explicitly exclude them
     if PYDANTIC_V1:
+        private_fields = {"_request_id", "_workspace_id", "__exclude_fields__"}
         try:
             exclude_fields = obj.__exclude_fields__  # type: ignore
         except AttributeError:
-            cast(Any, obj).__exclude_fields__ = {"_request_id", "__exclude_fields__"}
+            cast(Any, obj).__exclude_fields__ = private_fields
         else:
-            cast(Any, obj).__exclude_fields__ = {*(exclude_fields or {}), "_request_id", "__exclude_fields__"}
+            cast(Any, obj).__exclude_fields__ = {*(exclude_fields or {}), *private_fields}
 
 
 # our use of subclassing here causes weirdness for type checkers,
@@ -864,6 +989,17 @@ class FinalRequestOptions(pydantic.BaseModel):
     idempotency_key: Union[str, None] = None
     post_parser: Union[Callable[[Any], Any], NotGiven] = NotGiven()
     follow_redirects: Union[bool, None] = None
+    # The query pairs that tell the operation apart from the others with its path in the OpenAPI
+    # document. Set by the SDK method that makes the API call. Not a public option.
+    qualifiers: Optional[dict[str, str]] = None
+    # Set by the SDK method that makes the API call, for the call's span. Not public options.
+    span_name: Optional[str] = None
+    span_route: Optional[str] = None
+    span_query_params: Tuple[str, ...] = ()
+    # The query parameters that are content on this endpoint only.
+    span_content_query_params: Tuple[str, ...] = ()
+    span_attributes: Union[Mapping[str, AttributeValue], Callable[[object], Mapping[str, AttributeValue]], None] = None
+    span_created_id: Union[str, Tuple[str, str], None] = None
 
     content: Union[bytes, bytearray, IO[bytes], Iterable[bytes], AsyncIterable[bytes], None] = None
     # It should be noted that we cannot use `json` here as that would override

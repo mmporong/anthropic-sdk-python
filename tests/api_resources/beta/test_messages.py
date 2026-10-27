@@ -1,12 +1,9 @@
-# File generated from our OpenAPI spec by Stainless. See CONTRIBUTING.md for details.
-
 from __future__ import annotations
 
 import os
 from typing import Any, cast
 
 import pytest
-import pydantic
 
 from anthropic import Anthropic, AsyncAnthropic
 from tests.utils import assert_matches_type
@@ -31,7 +28,8 @@ class TestMessages:
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
+            extra_query={"beta": "true"},
         )
         assert_matches_type(BetaMessage, message, path=["response"])
 
@@ -45,10 +43,14 @@ class TestMessages:
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
             cache_control={
                 "type": "ephemeral",
                 "ttl": "5m",
+            },
+            compaction={
+                "type": "summarize",
+                "instructions": "instructions",
             },
             container={
                 "id": "id",
@@ -81,6 +83,9 @@ class TestMessages:
                     }
                 ]
             },
+            diagnostics={"previous_message_id": "previous_message_id"},
+            fallback_credit_token="x",
+            fallbacks="default",
             inference_geo="inference_geo",
             mcp_servers=[
                 {
@@ -101,6 +106,11 @@ class TestMessages:
                     "schema": {"foo": "bar"},
                     "type": "json_schema",
                 },
+                "task_budget": {
+                    "total": 1024,
+                    "type": "tokens",
+                    "remaining": 0,
+                },
             },
             service_tier="auto",
             speed="standard",
@@ -116,7 +126,7 @@ class TestMessages:
                     },
                     "citations": [
                         {
-                            "cited_text": "cited_text",
+                            "cited_text": "The grass is green. The sky is blue.",
                             "document_index": 0,
                             "document_title": "x",
                             "end_char_index": 0,
@@ -126,11 +136,12 @@ class TestMessages:
                     ],
                 }
             ],
-            temperature=1,
             thinking={
                 "type": "adaptive",
+                "block_binding": {"prefix_mismatch_behavior": "error"},
                 "display": "summarized",
             },
+            thread={"type": "create"},
             tool_choice={
                 "type": "auto",
                 "disable_parallel_tool_use": True,
@@ -159,9 +170,10 @@ class TestMessages:
                     "type": "custom",
                 }
             ],
-            top_k=5,
-            top_p=0.7,
-            betas=["string"],
+            betas=["message-batches-2024-09-24"],
+            user_profile_id="anthropic-user-profile-id",
+            workspace_id="wrkspc_011CZkZaBF1tNoB5wlCeusgy",
+            extra_query={"beta": "true"},
         )
         assert_matches_type(BetaMessage, message, path=["response"])
 
@@ -175,7 +187,8 @@ class TestMessages:
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
+            extra_query={"beta": "true"},
         )
 
         assert response.is_closed is True
@@ -193,7 +206,8 @@ class TestMessages:
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
+            extra_query={"beta": "true"},
         ) as response:
             assert not response.is_closed
             assert response.http_request.headers.get("X-Stainless-Lang") == "python"
@@ -213,8 +227,9 @@ class TestMessages:
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
             stream=True,
+            extra_query={"beta": "true"},
         )
         message_stream.response.close()
 
@@ -228,11 +243,15 @@ class TestMessages:
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
             stream=True,
             cache_control={
                 "type": "ephemeral",
                 "ttl": "5m",
+            },
+            compaction={
+                "type": "summarize",
+                "instructions": "instructions",
             },
             container={
                 "id": "id",
@@ -265,6 +284,9 @@ class TestMessages:
                     }
                 ]
             },
+            diagnostics={"previous_message_id": "previous_message_id"},
+            fallback_credit_token="x",
+            fallbacks="default",
             inference_geo="inference_geo",
             mcp_servers=[
                 {
@@ -285,6 +307,11 @@ class TestMessages:
                     "schema": {"foo": "bar"},
                     "type": "json_schema",
                 },
+                "task_budget": {
+                    "total": 1024,
+                    "type": "tokens",
+                    "remaining": 0,
+                },
             },
             service_tier="auto",
             speed="standard",
@@ -299,7 +326,7 @@ class TestMessages:
                     },
                     "citations": [
                         {
-                            "cited_text": "cited_text",
+                            "cited_text": "The grass is green. The sky is blue.",
                             "document_index": 0,
                             "document_title": "x",
                             "end_char_index": 0,
@@ -309,11 +336,12 @@ class TestMessages:
                     ],
                 }
             ],
-            temperature=1,
             thinking={
                 "type": "adaptive",
+                "block_binding": {"prefix_mismatch_behavior": "error"},
                 "display": "summarized",
             },
+            thread={"type": "create"},
             tool_choice={
                 "type": "auto",
                 "disable_parallel_tool_use": True,
@@ -342,9 +370,10 @@ class TestMessages:
                     "type": "custom",
                 }
             ],
-            top_k=5,
-            top_p=0.7,
-            betas=["string"],
+            betas=["message-batches-2024-09-24"],
+            user_profile_id="anthropic-user-profile-id",
+            workspace_id="wrkspc_011CZkZaBF1tNoB5wlCeusgy",
+            extra_query={"beta": "true"},
         )
         message_stream.response.close()
 
@@ -358,8 +387,9 @@ class TestMessages:
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
             stream=True,
+            extra_query={"beta": "true"},
         )
 
         assert response.http_request.headers.get("X-Stainless-Lang") == "python"
@@ -376,8 +406,9 @@ class TestMessages:
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
             stream=True,
+            extra_query={"beta": "true"},
         ) as response:
             assert not response.is_closed
             assert response.http_request.headers.get("X-Stainless-Lang") == "python"
@@ -392,11 +423,12 @@ class TestMessages:
         message = client.beta.messages.count_tokens(
             messages=[
                 {
-                    "content": "string",
+                    "content": "Hello, world",
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
+            extra_query={"beta": "true"},
         )
         assert_matches_type(BetaMessageTokensCount, message, path=["response"])
 
@@ -405,14 +437,18 @@ class TestMessages:
         message = client.beta.messages.count_tokens(
             messages=[
                 {
-                    "content": "string",
+                    "content": "Hello, world",
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
             cache_control={
                 "type": "ephemeral",
                 "ttl": "5m",
+            },
+            compaction={
+                "type": "summarize",
+                "instructions": "instructions",
             },
             context_management={
                 "edits": [
@@ -453,6 +489,11 @@ class TestMessages:
                     "schema": {"foo": "bar"},
                     "type": "json_schema",
                 },
+                "task_budget": {
+                    "total": 1024,
+                    "type": "tokens",
+                    "remaining": 0,
+                },
             },
             speed="fast",
             system=[
@@ -465,7 +506,7 @@ class TestMessages:
                     },
                     "citations": [
                         {
-                            "cited_text": "cited_text",
+                            "cited_text": "The grass is green. The sky is blue.",
                             "document_index": 0,
                             "document_title": "x",
                             "end_char_index": 0,
@@ -477,6 +518,7 @@ class TestMessages:
             ],
             thinking={
                 "type": "adaptive",
+                "block_binding": {"prefix_mismatch_behavior": "error"},
                 "display": "summarized",
             },
             tool_choice={
@@ -508,6 +550,8 @@ class TestMessages:
                 }
             ],
             betas=["string"],
+            workspace_id="wrkspc_011CZkZaBF1tNoB5wlCeusgy",
+            extra_query={"beta": "true"},
         )
         assert_matches_type(BetaMessageTokensCount, message, path=["response"])
 
@@ -516,11 +560,12 @@ class TestMessages:
         response = client.beta.messages.with_raw_response.count_tokens(
             messages=[
                 {
-                    "content": "string",
+                    "content": "Hello, world",
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
+            extra_query={"beta": "true"},
         )
 
         assert response.is_closed is True
@@ -533,11 +578,12 @@ class TestMessages:
         with client.beta.messages.with_streaming_response.count_tokens(
             messages=[
                 {
-                    "content": "string",
+                    "content": "Hello, world",
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
+            extra_query={"beta": "true"},
         ) as response:
             assert not response.is_closed
             assert response.http_request.headers.get("X-Stainless-Lang") == "python"
@@ -546,23 +592,6 @@ class TestMessages:
             assert_matches_type(BetaMessageTokensCount, message, path=["response"])
 
         assert cast(Any, response.is_closed) is True
-
-    @parametrize
-    def test_pydantic_error_in_create(self, client: Anthropic) -> None:
-        class MyModel(pydantic.BaseModel):
-            name: str
-            age: int
-
-        with pytest.raises(TypeError) as exc_info:
-            client.beta.messages.create(
-                max_tokens=1024,
-                messages=[{"role": "user", "content": "Test"}],
-                model="claude-sonnet-4-5-20250929",
-                output_format=MyModel,  # type: ignore
-            )
-
-        error_message = str(exc_info.value)
-        assert "parse()" in error_message
 
 
 class TestAsyncMessages:
@@ -580,7 +609,8 @@ class TestAsyncMessages:
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
+            extra_query={"beta": "true"},
         )
         assert_matches_type(BetaMessage, message, path=["response"])
 
@@ -594,10 +624,14 @@ class TestAsyncMessages:
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
             cache_control={
                 "type": "ephemeral",
                 "ttl": "5m",
+            },
+            compaction={
+                "type": "summarize",
+                "instructions": "instructions",
             },
             container={
                 "id": "id",
@@ -630,6 +664,9 @@ class TestAsyncMessages:
                     }
                 ]
             },
+            diagnostics={"previous_message_id": "previous_message_id"},
+            fallback_credit_token="x",
+            fallbacks="default",
             inference_geo="inference_geo",
             mcp_servers=[
                 {
@@ -650,6 +687,11 @@ class TestAsyncMessages:
                     "schema": {"foo": "bar"},
                     "type": "json_schema",
                 },
+                "task_budget": {
+                    "total": 1024,
+                    "type": "tokens",
+                    "remaining": 0,
+                },
             },
             service_tier="auto",
             speed="standard",
@@ -665,7 +707,7 @@ class TestAsyncMessages:
                     },
                     "citations": [
                         {
-                            "cited_text": "cited_text",
+                            "cited_text": "The grass is green. The sky is blue.",
                             "document_index": 0,
                             "document_title": "x",
                             "end_char_index": 0,
@@ -675,11 +717,12 @@ class TestAsyncMessages:
                     ],
                 }
             ],
-            temperature=1,
             thinking={
                 "type": "adaptive",
+                "block_binding": {"prefix_mismatch_behavior": "error"},
                 "display": "summarized",
             },
+            thread={"type": "create"},
             tool_choice={
                 "type": "auto",
                 "disable_parallel_tool_use": True,
@@ -708,9 +751,10 @@ class TestAsyncMessages:
                     "type": "custom",
                 }
             ],
-            top_k=5,
-            top_p=0.7,
-            betas=["string"],
+            betas=["message-batches-2024-09-24"],
+            user_profile_id="anthropic-user-profile-id",
+            workspace_id="wrkspc_011CZkZaBF1tNoB5wlCeusgy",
+            extra_query={"beta": "true"},
         )
         assert_matches_type(BetaMessage, message, path=["response"])
 
@@ -724,12 +768,13 @@ class TestAsyncMessages:
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
+            extra_query={"beta": "true"},
         )
 
         assert response.is_closed is True
         assert response.http_request.headers.get("X-Stainless-Lang") == "python"
-        message = response.parse()
+        message = await response.parse()
         assert_matches_type(BetaMessage, message, path=["response"])
 
     @parametrize
@@ -742,7 +787,8 @@ class TestAsyncMessages:
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
+            extra_query={"beta": "true"},
         ) as response:
             assert not response.is_closed
             assert response.http_request.headers.get("X-Stainless-Lang") == "python"
@@ -762,8 +808,9 @@ class TestAsyncMessages:
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
             stream=True,
+            extra_query={"beta": "true"},
         )
         await message_stream.response.aclose()
 
@@ -777,11 +824,15 @@ class TestAsyncMessages:
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
             stream=True,
             cache_control={
                 "type": "ephemeral",
                 "ttl": "5m",
+            },
+            compaction={
+                "type": "summarize",
+                "instructions": "instructions",
             },
             container={
                 "id": "id",
@@ -814,6 +865,9 @@ class TestAsyncMessages:
                     }
                 ]
             },
+            diagnostics={"previous_message_id": "previous_message_id"},
+            fallback_credit_token="x",
+            fallbacks="default",
             inference_geo="inference_geo",
             mcp_servers=[
                 {
@@ -834,6 +888,11 @@ class TestAsyncMessages:
                     "schema": {"foo": "bar"},
                     "type": "json_schema",
                 },
+                "task_budget": {
+                    "total": 1024,
+                    "type": "tokens",
+                    "remaining": 0,
+                },
             },
             service_tier="auto",
             speed="standard",
@@ -848,7 +907,7 @@ class TestAsyncMessages:
                     },
                     "citations": [
                         {
-                            "cited_text": "cited_text",
+                            "cited_text": "The grass is green. The sky is blue.",
                             "document_index": 0,
                             "document_title": "x",
                             "end_char_index": 0,
@@ -858,11 +917,12 @@ class TestAsyncMessages:
                     ],
                 }
             ],
-            temperature=1,
             thinking={
                 "type": "adaptive",
+                "block_binding": {"prefix_mismatch_behavior": "error"},
                 "display": "summarized",
             },
+            thread={"type": "create"},
             tool_choice={
                 "type": "auto",
                 "disable_parallel_tool_use": True,
@@ -891,9 +951,10 @@ class TestAsyncMessages:
                     "type": "custom",
                 }
             ],
-            top_k=5,
-            top_p=0.7,
-            betas=["string"],
+            betas=["message-batches-2024-09-24"],
+            user_profile_id="anthropic-user-profile-id",
+            workspace_id="wrkspc_011CZkZaBF1tNoB5wlCeusgy",
+            extra_query={"beta": "true"},
         )
         await message_stream.response.aclose()
 
@@ -907,12 +968,13 @@ class TestAsyncMessages:
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
             stream=True,
+            extra_query={"beta": "true"},
         )
 
         assert response.http_request.headers.get("X-Stainless-Lang") == "python"
-        stream = response.parse()
+        stream = await response.parse()
         await stream.close()
 
     @parametrize
@@ -925,8 +987,9 @@ class TestAsyncMessages:
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
             stream=True,
+            extra_query={"beta": "true"},
         ) as response:
             assert not response.is_closed
             assert response.http_request.headers.get("X-Stainless-Lang") == "python"
@@ -941,11 +1004,12 @@ class TestAsyncMessages:
         message = await async_client.beta.messages.count_tokens(
             messages=[
                 {
-                    "content": "string",
+                    "content": "Hello, world",
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
+            extra_query={"beta": "true"},
         )
         assert_matches_type(BetaMessageTokensCount, message, path=["response"])
 
@@ -954,14 +1018,18 @@ class TestAsyncMessages:
         message = await async_client.beta.messages.count_tokens(
             messages=[
                 {
-                    "content": "string",
+                    "content": "Hello, world",
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
             cache_control={
                 "type": "ephemeral",
                 "ttl": "5m",
+            },
+            compaction={
+                "type": "summarize",
+                "instructions": "instructions",
             },
             context_management={
                 "edits": [
@@ -1002,6 +1070,11 @@ class TestAsyncMessages:
                     "schema": {"foo": "bar"},
                     "type": "json_schema",
                 },
+                "task_budget": {
+                    "total": 1024,
+                    "type": "tokens",
+                    "remaining": 0,
+                },
             },
             speed="fast",
             system=[
@@ -1014,7 +1087,7 @@ class TestAsyncMessages:
                     },
                     "citations": [
                         {
-                            "cited_text": "cited_text",
+                            "cited_text": "The grass is green. The sky is blue.",
                             "document_index": 0,
                             "document_title": "x",
                             "end_char_index": 0,
@@ -1026,6 +1099,7 @@ class TestAsyncMessages:
             ],
             thinking={
                 "type": "adaptive",
+                "block_binding": {"prefix_mismatch_behavior": "error"},
                 "display": "summarized",
             },
             tool_choice={
@@ -1057,6 +1131,9 @@ class TestAsyncMessages:
                 }
             ],
             betas=["string"],
+            user_profile_id="anthropic-user-profile-id",
+            workspace_id="wrkspc_011CZkZaBF1tNoB5wlCeusgy",
+            extra_query={"beta": "true"},
         )
         assert_matches_type(BetaMessageTokensCount, message, path=["response"])
 
@@ -1065,16 +1142,17 @@ class TestAsyncMessages:
         response = await async_client.beta.messages.with_raw_response.count_tokens(
             messages=[
                 {
-                    "content": "string",
+                    "content": "Hello, world",
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
+            extra_query={"beta": "true"},
         )
 
         assert response.is_closed is True
         assert response.http_request.headers.get("X-Stainless-Lang") == "python"
-        message = response.parse()
+        message = await response.parse()
         assert_matches_type(BetaMessageTokensCount, message, path=["response"])
 
     @parametrize
@@ -1082,11 +1160,12 @@ class TestAsyncMessages:
         async with async_client.beta.messages.with_streaming_response.count_tokens(
             messages=[
                 {
-                    "content": "string",
+                    "content": "Hello, world",
                     "role": "user",
                 }
             ],
-            model="claude-opus-4-6",
+            model="claude-opus-5-5",
+            extra_query={"beta": "true"},
         ) as response:
             assert not response.is_closed
             assert response.http_request.headers.get("X-Stainless-Lang") == "python"
@@ -1095,20 +1174,3 @@ class TestAsyncMessages:
             assert_matches_type(BetaMessageTokensCount, message, path=["response"])
 
         assert cast(Any, response.is_closed) is True
-
-    @parametrize
-    async def test_pydantic_error_in_create(self, async_client: AsyncAnthropic) -> None:
-        class MyModel(pydantic.BaseModel):
-            name: str
-            age: int
-
-        with pytest.raises(TypeError) as exc_info:
-            await async_client.beta.messages.create(
-                max_tokens=1024,
-                messages=[{"role": "user", "content": "Test"}],
-                model="claude-sonnet-4-5-20250929",
-                output_format=MyModel,  # type: ignore
-            )
-
-        error_message = str(exc_info.value)
-        assert "parse()" in error_message

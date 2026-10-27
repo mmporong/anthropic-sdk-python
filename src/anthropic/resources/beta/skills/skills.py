@@ -1,13 +1,9 @@
-# File generated from our OpenAPI spec by Stainless. See CONTRIBUTING.md for details.
-
 from __future__ import annotations
 
 from typing import List, Mapping, Optional, cast
-from itertools import chain
 
-import httpx
+import httpx2
 
-from .... import _legacy_response
 from .versions import (
     Versions,
     AsyncVersions,
@@ -16,6 +12,7 @@ from .versions import (
     VersionsWithStreamingResponse,
     AsyncVersionsWithStreamingResponse,
 )
+from ...._files import deepcopy_with_paths
 from ...._types import (
     Body,
     Omit,
@@ -27,25 +24,20 @@ from ...._types import (
     omit,
     not_given,
 )
-from ...._utils import (
-    is_given,
-    extract_files,
-    maybe_transform,
-    strip_not_given,
-    deepcopy_minimal,
-    async_maybe_transform,
-)
+from ...._utils import is_given, extract_files, path_template, strip_not_given
 from ...._compat import cached_property
 from ...._resource import SyncAPIResource, AsyncAPIResource
-from ...._response import to_streamed_response_wrapper, async_to_streamed_response_wrapper
+from ...._response import (
+    to_raw_response_wrapper,
+    to_streamed_response_wrapper,
+    async_to_raw_response_wrapper,
+    async_to_streamed_response_wrapper,
+)
 from ....pagination import SyncPageCursor, AsyncPageCursor
-from ....types.beta import skill_list_params, skill_create_params
 from ...._base_client import AsyncPaginator, make_request_options
+from ....types.beta.beta_skill import BetaSkill
 from ....types.anthropic_beta_param import AnthropicBetaParam
-from ....types.beta.skill_list_response import SkillListResponse
-from ....types.beta.skill_create_response import SkillCreateResponse
-from ....types.beta.skill_delete_response import SkillDeleteResponse
-from ....types.beta.skill_retrieve_response import SkillRetrieveResponse
+from ....types.beta.beta_deleted_skill import BetaDeletedSkill
 
 __all__ = ["Skills", "AsyncSkills"]
 
@@ -77,31 +69,38 @@ class Skills(SyncAPIResource):
     def create(
         self,
         *,
-        display_title: Optional[str] | Omit = omit,
-        files: Optional[SequenceNotStr[FileTypes]] | Omit = omit,
+        files: SequenceNotStr[FileTypes],
+        display_name: Optional[str] | Omit = omit,
         betas: List[AnthropicBetaParam] | Omit = omit,
+        workspace_id: str | Omit = omit,
         # Use the following arguments if you need to pass additional parameters to the API that aren't available via kwargs.
         # The extra values given here take precedence over values defined on the client or passed to this method.
         extra_headers: Headers | None = None,
         extra_query: Query | None = None,
         extra_body: Body | None = None,
-        timeout: float | httpx.Timeout | None | NotGiven = not_given,
-    ) -> SkillCreateResponse:
+        timeout: float | httpx2.Timeout | None | NotGiven = not_given,
+    ) -> BetaSkill:
         """
         Create Skill
 
         Args:
-          display_title: Display title for the skill.
-
-              This is a human-readable label that is not included in the prompt sent to the
-              model.
-
           files: Files to upload for the skill.
 
               All files must be in the same top-level directory and must include a SKILL.md
               file at the root of that directory.
 
+          display_name: Human-readable, single-line label for the Skill. Maximum 255 characters. Always
+              set: derived from the SKILL.md frontmatter `name` when omitted at creation. Not
+              unique.
+
           betas: Optional header to specify the beta version(s) you want to use.
+
+          workspace_id: Optional header to select the Workspace for this request. The value is a
+              Workspace ID (for example, `wrkspc_011CZkZaBF1tNoB5wlCeusgy`).
+
+              Only needed for credentials that can act on more than one Workspace. A
+              credential that belongs to a specific Workspace may omit it; if sent, it must
+              match that Workspace.
 
           extra_headers: Send extra headers
 
@@ -114,33 +113,39 @@ class Skills(SyncAPIResource):
         extra_headers = {
             **strip_not_given(
                 {
-                    "anthropic-beta": ",".join(chain((str(e) for e in betas), ["skills-2025-10-02"]))
-                    if is_given(betas)
-                    else not_given
+                    "anthropic-beta": ",".join(str(e) for e in betas) if is_given(betas) else not_given,
+                    "anthropic-workspace-id": workspace_id,
                 }
             ),
             **(extra_headers or {}),
         }
-        extra_headers = {"anthropic-beta": "skills-2025-10-02", **(extra_headers or {})}
-        body = deepcopy_minimal(
+        body = deepcopy_with_paths(
             {
-                "display_title": display_title,
                 "files": files,
-            }
+                "display_name": display_name,
+            },
+            [["files", "<array>"]],
         )
         extracted_files = extract_files(cast(Mapping[str, object], body), paths=[["files", "<array>"]])
         # It should be noted that the actual Content-Type header that will be
         # sent to the server will contain a `boundary` parameter, e.g.
         # multipart/form-data; boundary=---abc--
-        extra_headers["Content-Type"] = "multipart/form-data"
+        extra_headers = {"Content-Type": "multipart/form-data", **(extra_headers or {})}
         return self._post(
-            "/v1/skills?beta=true",
-            body=maybe_transform(body, skill_create_params.SkillCreateParams),
+            "/v1/skills",
+            body=body,
             files=extracted_files,
             options=make_request_options(
-                extra_headers=extra_headers, extra_query=extra_query, extra_body=extra_body, timeout=timeout
+                extra_headers=extra_headers,
+                extra_query=extra_query,
+                extra_body=extra_body,
+                timeout=timeout,
+                qualifiers={"beta": "true"},
+                span_name="anthropic.skills.create",
+                span_route="/v1/skills",
+                span_created_id="anthropic.skill.id",
             ),
-            cast_to=SkillCreateResponse,
+            cast_to=BetaSkill,
         )
 
     def retrieve(
@@ -148,13 +153,14 @@ class Skills(SyncAPIResource):
         skill_id: str,
         *,
         betas: List[AnthropicBetaParam] | Omit = omit,
+        workspace_id: str | Omit = omit,
         # Use the following arguments if you need to pass additional parameters to the API that aren't available via kwargs.
         # The extra values given here take precedence over values defined on the client or passed to this method.
         extra_headers: Headers | None = None,
         extra_query: Query | None = None,
         extra_body: Body | None = None,
-        timeout: float | httpx.Timeout | None | NotGiven = not_given,
-    ) -> SkillRetrieveResponse:
+        timeout: float | httpx2.Timeout | None | NotGiven = not_given,
+    ) -> BetaSkill:
         """
         Get Skill
 
@@ -164,6 +170,13 @@ class Skills(SyncAPIResource):
               The format and length of IDs may change over time.
 
           betas: Optional header to specify the beta version(s) you want to use.
+
+          workspace_id: Optional header to select the Workspace for this request. The value is a
+              Workspace ID (for example, `wrkspc_011CZkZaBF1tNoB5wlCeusgy`).
+
+              Only needed for credentials that can act on more than one Workspace. A
+              credential that belongs to a specific Workspace may omit it; if sent, it must
+              match that Workspace.
 
           extra_headers: Send extra headers
 
@@ -178,20 +191,25 @@ class Skills(SyncAPIResource):
         extra_headers = {
             **strip_not_given(
                 {
-                    "anthropic-beta": ",".join(chain((str(e) for e in betas), ["skills-2025-10-02"]))
-                    if is_given(betas)
-                    else not_given
+                    "anthropic-beta": ",".join(str(e) for e in betas) if is_given(betas) else not_given,
+                    "anthropic-workspace-id": workspace_id,
                 }
             ),
             **(extra_headers or {}),
         }
-        extra_headers = {"anthropic-beta": "skills-2025-10-02", **(extra_headers or {})}
         return self._get(
-            f"/v1/skills/{skill_id}?beta=true",
+            path_template("/v1/skills/{skill_id}", skill_id=skill_id),
             options=make_request_options(
-                extra_headers=extra_headers, extra_query=extra_query, extra_body=extra_body, timeout=timeout
+                extra_headers=extra_headers,
+                extra_query=extra_query,
+                extra_body=extra_body,
+                timeout=timeout,
+                qualifiers={"beta": "true"},
+                span_name="anthropic.skills.retrieve",
+                span_route="/v1/skills/{skill_id}",
+                span_attributes={"anthropic.skill.id": skill_id},
             ),
-            cast_to=SkillRetrieveResponse,
+            cast_to=BetaSkill,
         )
 
     def list(
@@ -201,20 +219,21 @@ class Skills(SyncAPIResource):
         page: Optional[str] | Omit = omit,
         source: Optional[str] | Omit = omit,
         betas: List[AnthropicBetaParam] | Omit = omit,
+        workspace_id: str | Omit = omit,
         # Use the following arguments if you need to pass additional parameters to the API that aren't available via kwargs.
         # The extra values given here take precedence over values defined on the client or passed to this method.
         extra_headers: Headers | None = None,
         extra_query: Query | None = None,
         extra_body: Body | None = None,
-        timeout: float | httpx.Timeout | None | NotGiven = not_given,
-    ) -> SyncPageCursor[SkillListResponse]:
+        timeout: float | httpx2.Timeout | None | NotGiven = not_given,
+    ) -> SyncPageCursor[BetaSkill]:
         """
         List Skills
 
         Args:
           limit: Number of results to return per page.
 
-              Maximum value is 100. Defaults to 20.
+              Ranges from `1` to `1000`. Defaults to `20`.
 
           page: Pagination token for fetching a specific page of results.
 
@@ -230,6 +249,13 @@ class Skills(SyncAPIResource):
 
           betas: Optional header to specify the beta version(s) you want to use.
 
+          workspace_id: Optional header to select the Workspace for this request. The value is a
+              Workspace ID (for example, `wrkspc_011CZkZaBF1tNoB5wlCeusgy`).
+
+              Only needed for credentials that can act on more than one Workspace. A
+              credential that belongs to a specific Workspace may omit it; if sent, it must
+              match that Workspace.
+
           extra_headers: Send extra headers
 
           extra_query: Add additional query parameters to the request
@@ -241,32 +267,30 @@ class Skills(SyncAPIResource):
         extra_headers = {
             **strip_not_given(
                 {
-                    "anthropic-beta": ",".join(chain((str(e) for e in betas), ["skills-2025-10-02"]))
-                    if is_given(betas)
-                    else not_given
+                    "anthropic-beta": ",".join(str(e) for e in betas) if is_given(betas) else not_given,
+                    "anthropic-workspace-id": workspace_id,
                 }
             ),
             **(extra_headers or {}),
         }
-        extra_headers = {"anthropic-beta": "skills-2025-10-02", **(extra_headers or {})}
         return self._get_api_list(
-            "/v1/skills?beta=true",
-            page=SyncPageCursor[SkillListResponse],
+            "/v1/skills",
+            page=SyncPageCursor[BetaSkill],
             options=make_request_options(
                 extra_headers=extra_headers,
                 extra_query=extra_query,
                 extra_body=extra_body,
                 timeout=timeout,
-                query=maybe_transform(
-                    {
-                        "limit": limit,
-                        "page": page,
-                        "source": source,
-                    },
-                    skill_list_params.SkillListParams,
-                ),
+                query={
+                    "limit": limit,
+                    "page": page,
+                    "source": source,
+                },
+                qualifiers={"beta": "true"},
+                span_name="anthropic.skills.list",
+                span_route="/v1/skills",
             ),
-            model=SkillListResponse,
+            model=BetaSkill,
         )
 
     def delete(
@@ -274,13 +298,14 @@ class Skills(SyncAPIResource):
         skill_id: str,
         *,
         betas: List[AnthropicBetaParam] | Omit = omit,
+        workspace_id: str | Omit = omit,
         # Use the following arguments if you need to pass additional parameters to the API that aren't available via kwargs.
         # The extra values given here take precedence over values defined on the client or passed to this method.
         extra_headers: Headers | None = None,
         extra_query: Query | None = None,
         extra_body: Body | None = None,
-        timeout: float | httpx.Timeout | None | NotGiven = not_given,
-    ) -> SkillDeleteResponse:
+        timeout: float | httpx2.Timeout | None | NotGiven = not_given,
+    ) -> BetaDeletedSkill:
         """
         Delete Skill
 
@@ -290,6 +315,13 @@ class Skills(SyncAPIResource):
               The format and length of IDs may change over time.
 
           betas: Optional header to specify the beta version(s) you want to use.
+
+          workspace_id: Optional header to select the Workspace for this request. The value is a
+              Workspace ID (for example, `wrkspc_011CZkZaBF1tNoB5wlCeusgy`).
+
+              Only needed for credentials that can act on more than one Workspace. A
+              credential that belongs to a specific Workspace may omit it; if sent, it must
+              match that Workspace.
 
           extra_headers: Send extra headers
 
@@ -304,20 +336,25 @@ class Skills(SyncAPIResource):
         extra_headers = {
             **strip_not_given(
                 {
-                    "anthropic-beta": ",".join(chain((str(e) for e in betas), ["skills-2025-10-02"]))
-                    if is_given(betas)
-                    else not_given
+                    "anthropic-beta": ",".join(str(e) for e in betas) if is_given(betas) else not_given,
+                    "anthropic-workspace-id": workspace_id,
                 }
             ),
             **(extra_headers or {}),
         }
-        extra_headers = {"anthropic-beta": "skills-2025-10-02", **(extra_headers or {})}
         return self._delete(
-            f"/v1/skills/{skill_id}?beta=true",
+            path_template("/v1/skills/{skill_id}", skill_id=skill_id),
             options=make_request_options(
-                extra_headers=extra_headers, extra_query=extra_query, extra_body=extra_body, timeout=timeout
+                extra_headers=extra_headers,
+                extra_query=extra_query,
+                extra_body=extra_body,
+                timeout=timeout,
+                qualifiers={"beta": "true"},
+                span_name="anthropic.skills.delete",
+                span_route="/v1/skills/{skill_id}",
+                span_attributes={"anthropic.skill.id": skill_id},
             ),
-            cast_to=SkillDeleteResponse,
+            cast_to=BetaDeletedSkill,
         )
 
 
@@ -348,31 +385,38 @@ class AsyncSkills(AsyncAPIResource):
     async def create(
         self,
         *,
-        display_title: Optional[str] | Omit = omit,
-        files: Optional[SequenceNotStr[FileTypes]] | Omit = omit,
+        files: SequenceNotStr[FileTypes],
+        display_name: Optional[str] | Omit = omit,
         betas: List[AnthropicBetaParam] | Omit = omit,
+        workspace_id: str | Omit = omit,
         # Use the following arguments if you need to pass additional parameters to the API that aren't available via kwargs.
         # The extra values given here take precedence over values defined on the client or passed to this method.
         extra_headers: Headers | None = None,
         extra_query: Query | None = None,
         extra_body: Body | None = None,
-        timeout: float | httpx.Timeout | None | NotGiven = not_given,
-    ) -> SkillCreateResponse:
+        timeout: float | httpx2.Timeout | None | NotGiven = not_given,
+    ) -> BetaSkill:
         """
         Create Skill
 
         Args:
-          display_title: Display title for the skill.
-
-              This is a human-readable label that is not included in the prompt sent to the
-              model.
-
           files: Files to upload for the skill.
 
               All files must be in the same top-level directory and must include a SKILL.md
               file at the root of that directory.
 
+          display_name: Human-readable, single-line label for the Skill. Maximum 255 characters. Always
+              set: derived from the SKILL.md frontmatter `name` when omitted at creation. Not
+              unique.
+
           betas: Optional header to specify the beta version(s) you want to use.
+
+          workspace_id: Optional header to select the Workspace for this request. The value is a
+              Workspace ID (for example, `wrkspc_011CZkZaBF1tNoB5wlCeusgy`).
+
+              Only needed for credentials that can act on more than one Workspace. A
+              credential that belongs to a specific Workspace may omit it; if sent, it must
+              match that Workspace.
 
           extra_headers: Send extra headers
 
@@ -385,33 +429,39 @@ class AsyncSkills(AsyncAPIResource):
         extra_headers = {
             **strip_not_given(
                 {
-                    "anthropic-beta": ",".join(chain((str(e) for e in betas), ["skills-2025-10-02"]))
-                    if is_given(betas)
-                    else not_given
+                    "anthropic-beta": ",".join(str(e) for e in betas) if is_given(betas) else not_given,
+                    "anthropic-workspace-id": workspace_id,
                 }
             ),
             **(extra_headers or {}),
         }
-        extra_headers = {"anthropic-beta": "skills-2025-10-02", **(extra_headers or {})}
-        body = deepcopy_minimal(
+        body = deepcopy_with_paths(
             {
-                "display_title": display_title,
                 "files": files,
-            }
+                "display_name": display_name,
+            },
+            [["files", "<array>"]],
         )
         extracted_files = extract_files(cast(Mapping[str, object], body), paths=[["files", "<array>"]])
         # It should be noted that the actual Content-Type header that will be
         # sent to the server will contain a `boundary` parameter, e.g.
         # multipart/form-data; boundary=---abc--
-        extra_headers["Content-Type"] = "multipart/form-data"
+        extra_headers = {"Content-Type": "multipart/form-data", **(extra_headers or {})}
         return await self._post(
-            "/v1/skills?beta=true",
-            body=await async_maybe_transform(body, skill_create_params.SkillCreateParams),
+            "/v1/skills",
+            body=body,
             files=extracted_files,
             options=make_request_options(
-                extra_headers=extra_headers, extra_query=extra_query, extra_body=extra_body, timeout=timeout
+                extra_headers=extra_headers,
+                extra_query=extra_query,
+                extra_body=extra_body,
+                timeout=timeout,
+                qualifiers={"beta": "true"},
+                span_name="anthropic.skills.create",
+                span_route="/v1/skills",
+                span_created_id="anthropic.skill.id",
             ),
-            cast_to=SkillCreateResponse,
+            cast_to=BetaSkill,
         )
 
     async def retrieve(
@@ -419,13 +469,14 @@ class AsyncSkills(AsyncAPIResource):
         skill_id: str,
         *,
         betas: List[AnthropicBetaParam] | Omit = omit,
+        workspace_id: str | Omit = omit,
         # Use the following arguments if you need to pass additional parameters to the API that aren't available via kwargs.
         # The extra values given here take precedence over values defined on the client or passed to this method.
         extra_headers: Headers | None = None,
         extra_query: Query | None = None,
         extra_body: Body | None = None,
-        timeout: float | httpx.Timeout | None | NotGiven = not_given,
-    ) -> SkillRetrieveResponse:
+        timeout: float | httpx2.Timeout | None | NotGiven = not_given,
+    ) -> BetaSkill:
         """
         Get Skill
 
@@ -435,6 +486,13 @@ class AsyncSkills(AsyncAPIResource):
               The format and length of IDs may change over time.
 
           betas: Optional header to specify the beta version(s) you want to use.
+
+          workspace_id: Optional header to select the Workspace for this request. The value is a
+              Workspace ID (for example, `wrkspc_011CZkZaBF1tNoB5wlCeusgy`).
+
+              Only needed for credentials that can act on more than one Workspace. A
+              credential that belongs to a specific Workspace may omit it; if sent, it must
+              match that Workspace.
 
           extra_headers: Send extra headers
 
@@ -449,20 +507,25 @@ class AsyncSkills(AsyncAPIResource):
         extra_headers = {
             **strip_not_given(
                 {
-                    "anthropic-beta": ",".join(chain((str(e) for e in betas), ["skills-2025-10-02"]))
-                    if is_given(betas)
-                    else not_given
+                    "anthropic-beta": ",".join(str(e) for e in betas) if is_given(betas) else not_given,
+                    "anthropic-workspace-id": workspace_id,
                 }
             ),
             **(extra_headers or {}),
         }
-        extra_headers = {"anthropic-beta": "skills-2025-10-02", **(extra_headers or {})}
         return await self._get(
-            f"/v1/skills/{skill_id}?beta=true",
+            path_template("/v1/skills/{skill_id}", skill_id=skill_id),
             options=make_request_options(
-                extra_headers=extra_headers, extra_query=extra_query, extra_body=extra_body, timeout=timeout
+                extra_headers=extra_headers,
+                extra_query=extra_query,
+                extra_body=extra_body,
+                timeout=timeout,
+                qualifiers={"beta": "true"},
+                span_name="anthropic.skills.retrieve",
+                span_route="/v1/skills/{skill_id}",
+                span_attributes={"anthropic.skill.id": skill_id},
             ),
-            cast_to=SkillRetrieveResponse,
+            cast_to=BetaSkill,
         )
 
     def list(
@@ -472,20 +535,21 @@ class AsyncSkills(AsyncAPIResource):
         page: Optional[str] | Omit = omit,
         source: Optional[str] | Omit = omit,
         betas: List[AnthropicBetaParam] | Omit = omit,
+        workspace_id: str | Omit = omit,
         # Use the following arguments if you need to pass additional parameters to the API that aren't available via kwargs.
         # The extra values given here take precedence over values defined on the client or passed to this method.
         extra_headers: Headers | None = None,
         extra_query: Query | None = None,
         extra_body: Body | None = None,
-        timeout: float | httpx.Timeout | None | NotGiven = not_given,
-    ) -> AsyncPaginator[SkillListResponse, AsyncPageCursor[SkillListResponse]]:
+        timeout: float | httpx2.Timeout | None | NotGiven = not_given,
+    ) -> AsyncPaginator[BetaSkill, AsyncPageCursor[BetaSkill]]:
         """
         List Skills
 
         Args:
           limit: Number of results to return per page.
 
-              Maximum value is 100. Defaults to 20.
+              Ranges from `1` to `1000`. Defaults to `20`.
 
           page: Pagination token for fetching a specific page of results.
 
@@ -501,6 +565,13 @@ class AsyncSkills(AsyncAPIResource):
 
           betas: Optional header to specify the beta version(s) you want to use.
 
+          workspace_id: Optional header to select the Workspace for this request. The value is a
+              Workspace ID (for example, `wrkspc_011CZkZaBF1tNoB5wlCeusgy`).
+
+              Only needed for credentials that can act on more than one Workspace. A
+              credential that belongs to a specific Workspace may omit it; if sent, it must
+              match that Workspace.
+
           extra_headers: Send extra headers
 
           extra_query: Add additional query parameters to the request
@@ -512,32 +583,30 @@ class AsyncSkills(AsyncAPIResource):
         extra_headers = {
             **strip_not_given(
                 {
-                    "anthropic-beta": ",".join(chain((str(e) for e in betas), ["skills-2025-10-02"]))
-                    if is_given(betas)
-                    else not_given
+                    "anthropic-beta": ",".join(str(e) for e in betas) if is_given(betas) else not_given,
+                    "anthropic-workspace-id": workspace_id,
                 }
             ),
             **(extra_headers or {}),
         }
-        extra_headers = {"anthropic-beta": "skills-2025-10-02", **(extra_headers or {})}
         return self._get_api_list(
-            "/v1/skills?beta=true",
-            page=AsyncPageCursor[SkillListResponse],
+            "/v1/skills",
+            page=AsyncPageCursor[BetaSkill],
             options=make_request_options(
                 extra_headers=extra_headers,
                 extra_query=extra_query,
                 extra_body=extra_body,
                 timeout=timeout,
-                query=maybe_transform(
-                    {
-                        "limit": limit,
-                        "page": page,
-                        "source": source,
-                    },
-                    skill_list_params.SkillListParams,
-                ),
+                query={
+                    "limit": limit,
+                    "page": page,
+                    "source": source,
+                },
+                qualifiers={"beta": "true"},
+                span_name="anthropic.skills.list",
+                span_route="/v1/skills",
             ),
-            model=SkillListResponse,
+            model=BetaSkill,
         )
 
     async def delete(
@@ -545,13 +614,14 @@ class AsyncSkills(AsyncAPIResource):
         skill_id: str,
         *,
         betas: List[AnthropicBetaParam] | Omit = omit,
+        workspace_id: str | Omit = omit,
         # Use the following arguments if you need to pass additional parameters to the API that aren't available via kwargs.
         # The extra values given here take precedence over values defined on the client or passed to this method.
         extra_headers: Headers | None = None,
         extra_query: Query | None = None,
         extra_body: Body | None = None,
-        timeout: float | httpx.Timeout | None | NotGiven = not_given,
-    ) -> SkillDeleteResponse:
+        timeout: float | httpx2.Timeout | None | NotGiven = not_given,
+    ) -> BetaDeletedSkill:
         """
         Delete Skill
 
@@ -561,6 +631,13 @@ class AsyncSkills(AsyncAPIResource):
               The format and length of IDs may change over time.
 
           betas: Optional header to specify the beta version(s) you want to use.
+
+          workspace_id: Optional header to select the Workspace for this request. The value is a
+              Workspace ID (for example, `wrkspc_011CZkZaBF1tNoB5wlCeusgy`).
+
+              Only needed for credentials that can act on more than one Workspace. A
+              credential that belongs to a specific Workspace may omit it; if sent, it must
+              match that Workspace.
 
           extra_headers: Send extra headers
 
@@ -575,20 +652,25 @@ class AsyncSkills(AsyncAPIResource):
         extra_headers = {
             **strip_not_given(
                 {
-                    "anthropic-beta": ",".join(chain((str(e) for e in betas), ["skills-2025-10-02"]))
-                    if is_given(betas)
-                    else not_given
+                    "anthropic-beta": ",".join(str(e) for e in betas) if is_given(betas) else not_given,
+                    "anthropic-workspace-id": workspace_id,
                 }
             ),
             **(extra_headers or {}),
         }
-        extra_headers = {"anthropic-beta": "skills-2025-10-02", **(extra_headers or {})}
         return await self._delete(
-            f"/v1/skills/{skill_id}?beta=true",
+            path_template("/v1/skills/{skill_id}", skill_id=skill_id),
             options=make_request_options(
-                extra_headers=extra_headers, extra_query=extra_query, extra_body=extra_body, timeout=timeout
+                extra_headers=extra_headers,
+                extra_query=extra_query,
+                extra_body=extra_body,
+                timeout=timeout,
+                qualifiers={"beta": "true"},
+                span_name="anthropic.skills.delete",
+                span_route="/v1/skills/{skill_id}",
+                span_attributes={"anthropic.skill.id": skill_id},
             ),
-            cast_to=SkillDeleteResponse,
+            cast_to=BetaDeletedSkill,
         )
 
 
@@ -596,16 +678,16 @@ class SkillsWithRawResponse:
     def __init__(self, skills: Skills) -> None:
         self._skills = skills
 
-        self.create = _legacy_response.to_raw_response_wrapper(
+        self.create = to_raw_response_wrapper(
             skills.create,
         )
-        self.retrieve = _legacy_response.to_raw_response_wrapper(
+        self.retrieve = to_raw_response_wrapper(
             skills.retrieve,
         )
-        self.list = _legacy_response.to_raw_response_wrapper(
+        self.list = to_raw_response_wrapper(
             skills.list,
         )
-        self.delete = _legacy_response.to_raw_response_wrapper(
+        self.delete = to_raw_response_wrapper(
             skills.delete,
         )
 
@@ -618,16 +700,16 @@ class AsyncSkillsWithRawResponse:
     def __init__(self, skills: AsyncSkills) -> None:
         self._skills = skills
 
-        self.create = _legacy_response.async_to_raw_response_wrapper(
+        self.create = async_to_raw_response_wrapper(
             skills.create,
         )
-        self.retrieve = _legacy_response.async_to_raw_response_wrapper(
+        self.retrieve = async_to_raw_response_wrapper(
             skills.retrieve,
         )
-        self.list = _legacy_response.async_to_raw_response_wrapper(
+        self.list = async_to_raw_response_wrapper(
             skills.list,
         )
-        self.delete = _legacy_response.async_to_raw_response_wrapper(
+        self.delete = async_to_raw_response_wrapper(
             skills.delete,
         )
 

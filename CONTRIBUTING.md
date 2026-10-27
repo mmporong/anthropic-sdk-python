@@ -121,8 +121,7 @@ To refresh these snapshots, run the tests with the `--http-record` flag:
 
 ## Linting and formatting
 
-This repository uses [ruff](https://github.com/astral-sh/ruff) and
-[black](https://github.com/psf/black) to format the code in the repository.
+This repository uses [ruff](https://github.com/astral-sh/ruff) to lint and format the code in the repository.
 
 To lint:
 
@@ -149,3 +148,7 @@ You can release to package managers by using [the `Publish PyPI` GitHub action](
 
 If you need to manually release a package, you can run the `bin/publish-pypi` script with a `PYPI_TOKEN` set on
 the environment.
+
+## License
+
+By contributing to this repository, you agree that your contributions are licensed under the Apache License, Version 2.0 (see [LICENSE](LICENSE)).

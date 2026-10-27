@@ -12,11 +12,11 @@ else
   uv run ruff check .
 fi
 
-echo "==> Running pyright"
-uv run pyright
+echo "==> Checking dependency version caps"
+uv run python scripts/utils/check-dependency-caps.py
 
-echo "==> Running mypy"
-uv run mypy .
+echo "==> Running pyright"
+uv run pyright --project .
 
 echo "==> Making sure it imports"
 uv run python -c 'import anthropic'

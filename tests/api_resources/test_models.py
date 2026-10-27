@@ -1,5 +1,3 @@
-# File generated from our OpenAPI spec by Stainless. See CONTRIBUTING.md for details.
-
 from __future__ import annotations
 
 import os
@@ -29,7 +27,7 @@ class TestModels:
     def test_method_retrieve_with_all_params(self, client: Anthropic) -> None:
         model = client.models.retrieve(
             model_id="model_id",
-            betas=["string"],
+            workspace_id="wrkspc_011CZkZaBF1tNoB5wlCeusgy",
         )
         assert_matches_type(ModelInfo, model, path=["response"])
 
@@ -74,8 +72,9 @@ class TestModels:
         model = client.models.list(
             after_id="after_id",
             before_id="before_id",
+            lifecycle=["active"],
             limit=1,
-            betas=["string"],
+            workspace_id="wrkspc_011CZkZaBF1tNoB5wlCeusgy",
         )
         assert_matches_type(SyncPage[ModelInfo], model, path=["response"])
 
@@ -116,7 +115,7 @@ class TestAsyncModels:
     async def test_method_retrieve_with_all_params(self, async_client: AsyncAnthropic) -> None:
         model = await async_client.models.retrieve(
             model_id="model_id",
-            betas=["string"],
+            workspace_id="wrkspc_011CZkZaBF1tNoB5wlCeusgy",
         )
         assert_matches_type(ModelInfo, model, path=["response"])
 
@@ -128,7 +127,7 @@ class TestAsyncModels:
 
         assert response.is_closed is True
         assert response.http_request.headers.get("X-Stainless-Lang") == "python"
-        model = response.parse()
+        model = await response.parse()
         assert_matches_type(ModelInfo, model, path=["response"])
 
     @parametrize
@@ -161,8 +160,9 @@ class TestAsyncModels:
         model = await async_client.models.list(
             after_id="after_id",
             before_id="before_id",
+            lifecycle=["active"],
             limit=1,
-            betas=["string"],
+            workspace_id="wrkspc_011CZkZaBF1tNoB5wlCeusgy",
         )
         assert_matches_type(AsyncPage[ModelInfo], model, path=["response"])
 
@@ -172,7 +172,7 @@ class TestAsyncModels:
 
         assert response.is_closed is True
         assert response.http_request.headers.get("X-Stainless-Lang") == "python"
-        model = response.parse()
+        model = await response.parse()
         assert_matches_type(AsyncPage[ModelInfo], model, path=["response"])
 
     @parametrize

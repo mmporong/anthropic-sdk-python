@@ -1,8 +1,7 @@
-.prism.log
+.stdy.log
 _dev
 
 __pycache__
-.mypy_cache
 
 dist
 

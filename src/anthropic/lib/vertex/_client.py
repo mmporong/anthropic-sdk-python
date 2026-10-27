@@ -1,40 +1,44 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any, Union, Mapping, TypeVar
+from typing import TYPE_CHECKING, Any, Union, Mapping, TypeVar, Sequence
 from typing_extensions import Self, override
 
-import httpx
+import httpx2
 
 from ... import _exceptions
 from ._auth import load_auth, refresh_auth
 from ._beta import Beta, AsyncBeta
-from ..._types import NOT_GIVEN, NotGiven
+from ..._types import NotGiven, OpenTelemetryClientOption, not_given
 from ..._utils import is_dict, asyncify, is_given
+from ..._client import _keep_client_header_params
 from ..._compat import model_copy, typed_cached_property
 from ..._models import FinalRequestOptions
 from ..._version import __version__
+from ..._constants import ANTHROPIC_API_VERSION
 from ..._streaming import Stream, AsyncStream
 from ..._exceptions import AnthropicError, APIStatusError
+from ..._middleware import MiddlewareInput
 from ..._base_client import (
     DEFAULT_MAX_RETRIES,
     BaseClient,
     SyncAPIClient,
     AsyncAPIClient,
+    merge_headers,
 )
 from ...resources.messages import Messages, AsyncMessages
 
 if TYPE_CHECKING:
     from google.auth.credentials import Credentials as GoogleCredentials  # type: ignore
 
-
-DEFAULT_VERSION = "vertex-2023-10-16"
-
-_HttpxClientT = TypeVar("_HttpxClientT", bound=Union[httpx.Client, httpx.AsyncClient])
+_HttpxClientT = TypeVar("_HttpxClientT", bound=Union[httpx2.Client, httpx2.AsyncClient])
 _DefaultStreamT = TypeVar("_DefaultStreamT", bound=Union[Stream[Any], AsyncStream[Any]])
 
 
 class BaseVertexClient(BaseClient[_HttpxClientT, _DefaultStreamT]):
+    _gen_ai_provider_name = "gcp.vertex_ai"
+    _otel_platform = "vertex"
+
     @typed_cached_property
     def region(self) -> str:
         raise RuntimeError("region not set")
@@ -53,7 +57,7 @@ class BaseVertexClient(BaseClient[_HttpxClientT, _DefaultStreamT]):
         err_msg: str,
         *,
         body: object,
-        response: httpx.Response,
+        response: httpx2.Response,
     ) -> APIStatusError:
         if response.status_code == 400:
             return _exceptions.BadRequestError(err_msg, response=response, body=body)
@@ -87,28 +91,32 @@ class BaseVertexClient(BaseClient[_HttpxClientT, _DefaultStreamT]):
         return APIStatusError(err_msg, response=response, body=body)
 
 
-class AnthropicVertex(BaseVertexClient[httpx.Client, Stream[Any]], SyncAPIClient):
+class AnthropicVertex(BaseVertexClient[httpx2.Client, Stream[Any]], SyncAPIClient):
     messages: Messages
     beta: Beta
 
     def __init__(
         self,
         *,
-        region: str | NotGiven = NOT_GIVEN,
-        project_id: str | NotGiven = NOT_GIVEN,
+        region: str | NotGiven = not_given,
+        project_id: str | NotGiven = not_given,
         access_token: str | None = None,
         credentials: GoogleCredentials | None = None,
-        base_url: str | httpx.URL | None = None,
-        timeout: float | httpx.Timeout | None | NotGiven = NOT_GIVEN,
+        base_url: str | httpx2.URL | None = None,
+        timeout: float | httpx2.Timeout | None | NotGiven = not_given,
         max_retries: int = DEFAULT_MAX_RETRIES,
         default_headers: Mapping[str, str] | None = None,
         default_query: Mapping[str, object] | None = None,
+        # OpenTelemetry tracing of this client's API calls. `False` disables the spans, and
+        # `traces.content_mode` set to `"content"` adds the content of requests and responses to them.
+        open_telemetry: OpenTelemetryClientOption = None,
         # Configure a custom httpx client. See the [httpx documentation](https://www.python-httpx.org/api/#client) for more details.
-        http_client: httpx.Client | None = None,
+        http_client: httpx2.Client | None = None,
+        middleware: Sequence[MiddlewareInput] | None = None,
         _strict_response_validation: bool = False,
     ) -> None:
         if not is_given(region):
-            region = os.environ.get("CLOUD_ML_REGION", NOT_GIVEN)
+            region = os.environ.get("CLOUD_ML_REGION", not_given)
         if not is_given(region):
             raise ValueError(
                 "No region was given. The client should be instantiated with the `region` argument or the `CLOUD_ML_REGION` environment variable should be set."
@@ -119,6 +127,10 @@ class AnthropicVertex(BaseVertexClient[httpx.Client, Stream[Any]], SyncAPIClient
             if base_url is None:
                 if region == "global":
                     base_url = "https://aiplatform.googleapis.com/v1"
+                elif region == "us":
+                    base_url = "https://aiplatform.us.rep.googleapis.com/v1"
+                elif region == "eu":
+                    base_url = "https://aiplatform.eu.rep.googleapis.com/v1"
                 else:
                     base_url = f"https://{region}-aiplatform.googleapis.com/v1"
 
@@ -127,9 +139,11 @@ class AnthropicVertex(BaseVertexClient[httpx.Client, Stream[Any]], SyncAPIClient
             base_url=base_url,
             timeout=timeout,
             max_retries=max_retries,
+            open_telemetry=open_telemetry,
             custom_headers=default_headers,
             custom_query=default_query,
             http_client=http_client,
+            middleware=middleware,
             _strict_response_validation=_strict_response_validation,
         )
 
@@ -148,7 +162,7 @@ class AnthropicVertex(BaseVertexClient[httpx.Client, Stream[Any]], SyncAPIClient
         return _prepare_options(options, project_id=self.project_id, region=self.region)
 
     @override
-    def _prepare_request(self, request: httpx.Request) -> None:
+    def _prepare_request(self, request: httpx2.Request) -> None:
         if request.headers.get("Authorization"):
             # already authenticated, nothing for us to do
             return
@@ -176,18 +190,20 @@ class AnthropicVertex(BaseVertexClient[httpx.Client, Stream[Any]], SyncAPIClient
     def copy(
         self,
         *,
-        region: str | NotGiven = NOT_GIVEN,
-        project_id: str | NotGiven = NOT_GIVEN,
+        region: str | NotGiven = not_given,
+        project_id: str | NotGiven = not_given,
         access_token: str | None = None,
         credentials: GoogleCredentials | None = None,
-        base_url: str | httpx.URL | None = None,
-        timeout: float | httpx.Timeout | None | NotGiven = NOT_GIVEN,
-        http_client: httpx.Client | None = None,
-        max_retries: int | NotGiven = NOT_GIVEN,
+        base_url: str | httpx2.URL | None = None,
+        timeout: float | httpx2.Timeout | None | NotGiven = not_given,
+        http_client: httpx2.Client | None = None,
+        max_retries: int | NotGiven = not_given,
+        open_telemetry: OpenTelemetryClientOption = None,
         default_headers: Mapping[str, str] | None = None,
         set_default_headers: Mapping[str, str] | None = None,
         default_query: Mapping[str, object] | None = None,
         set_default_query: Mapping[str, object] | None = None,
+        middleware: Sequence[MiddlewareInput] | None | NotGiven = not_given,
         _extra_kwargs: Mapping[str, Any] = {},
     ) -> Self:
         """
@@ -201,7 +217,7 @@ class AnthropicVertex(BaseVertexClient[httpx.Client, Stream[Any]], SyncAPIClient
 
         headers = self._custom_headers
         if default_headers is not None:
-            headers = {**headers, **default_headers}
+            headers = merge_headers(headers, default_headers)
         elif set_default_headers is not None:
             headers = set_default_headers
 
@@ -215,15 +231,17 @@ class AnthropicVertex(BaseVertexClient[httpx.Client, Stream[Any]], SyncAPIClient
 
         return self.__class__(
             region=region if is_given(region) else self.region,
-            project_id=project_id if is_given(project_id) else self.project_id or NOT_GIVEN,
+            project_id=project_id if is_given(project_id) else self.project_id or not_given,
             access_token=access_token or self.access_token,
             credentials=credentials or self.credentials,
             base_url=base_url or self.base_url,
             timeout=self.timeout if isinstance(timeout, NotGiven) else timeout,
             http_client=http_client,
             max_retries=max_retries if is_given(max_retries) else self.max_retries,
+            open_telemetry=self._copy_open_telemetry(open_telemetry),
             default_headers=headers,
             default_query=params,
+            middleware=self._middleware if isinstance(middleware, NotGiven) else middleware,
             **_extra_kwargs,
         )
 
@@ -231,29 +249,44 @@ class AnthropicVertex(BaseVertexClient[httpx.Client, Stream[Any]], SyncAPIClient
     # client.with_options(timeout=10).foo.create(...)
     with_options = copy
 
+    def with_middleware(self, *middleware: MiddlewareInput) -> Self:
+        """A new client with the given middleware appended after this client's middleware.
 
-class AsyncAnthropicVertex(BaseVertexClient[httpx.AsyncClient, AsyncStream[Any]], AsyncAPIClient):
+        Convenience for applying extra middleware to a single request:
+
+        ```py
+        client.with_middleware(my_middleware).messages.create(...)
+        ```
+        """
+        return self.copy(middleware=[*self._middleware, *middleware])
+
+
+class AsyncAnthropicVertex(BaseVertexClient[httpx2.AsyncClient, AsyncStream[Any]], AsyncAPIClient):
     messages: AsyncMessages
     beta: AsyncBeta
 
     def __init__(
         self,
         *,
-        region: str | NotGiven = NOT_GIVEN,
-        project_id: str | NotGiven = NOT_GIVEN,
+        region: str | NotGiven = not_given,
+        project_id: str | NotGiven = not_given,
         access_token: str | None = None,
         credentials: GoogleCredentials | None = None,
-        base_url: str | httpx.URL | None = None,
-        timeout: float | httpx.Timeout | None | NotGiven = NOT_GIVEN,
+        base_url: str | httpx2.URL | None = None,
+        timeout: float | httpx2.Timeout | None | NotGiven = not_given,
         max_retries: int = DEFAULT_MAX_RETRIES,
         default_headers: Mapping[str, str] | None = None,
         default_query: Mapping[str, object] | None = None,
+        # OpenTelemetry tracing of this client's API calls. `False` disables the spans, and
+        # `traces.content_mode` set to `"content"` adds the content of requests and responses to them.
+        open_telemetry: OpenTelemetryClientOption = None,
         # Configure a custom httpx client. See the [httpx documentation](https://www.python-httpx.org/api/#client) for more details.
-        http_client: httpx.AsyncClient | None = None,
+        http_client: httpx2.AsyncClient | None = None,
+        middleware: Sequence[MiddlewareInput] | None = None,
         _strict_response_validation: bool = False,
     ) -> None:
         if not is_given(region):
-            region = os.environ.get("CLOUD_ML_REGION", NOT_GIVEN)
+            region = os.environ.get("CLOUD_ML_REGION", not_given)
         if not is_given(region):
             raise ValueError(
                 "No region was given. The client should be instantiated with the `region` argument or the `CLOUD_ML_REGION` environment variable should be set."
@@ -264,6 +297,10 @@ class AsyncAnthropicVertex(BaseVertexClient[httpx.AsyncClient, AsyncStream[Any]]
             if base_url is None:
                 if region == "global":
                     base_url = "https://aiplatform.googleapis.com/v1"
+                elif region == "us":
+                    base_url = "https://aiplatform.us.rep.googleapis.com/v1"
+                elif region == "eu":
+                    base_url = "https://aiplatform.eu.rep.googleapis.com/v1"
                 else:
                     base_url = f"https://{region}-aiplatform.googleapis.com/v1"
 
@@ -272,9 +309,11 @@ class AsyncAnthropicVertex(BaseVertexClient[httpx.AsyncClient, AsyncStream[Any]]
             base_url=base_url,
             timeout=timeout,
             max_retries=max_retries,
+            open_telemetry=open_telemetry,
             custom_headers=default_headers,
             custom_query=default_query,
             http_client=http_client,
+            middleware=middleware,
             _strict_response_validation=_strict_response_validation,
         )
 
@@ -293,7 +332,7 @@ class AsyncAnthropicVertex(BaseVertexClient[httpx.AsyncClient, AsyncStream[Any]]
         return _prepare_options(options, project_id=self.project_id, region=self.region)
 
     @override
-    async def _prepare_request(self, request: httpx.Request) -> None:
+    async def _prepare_request(self, request: httpx2.Request) -> None:
         if request.headers.get("Authorization"):
             # already authenticated, nothing for us to do
             return
@@ -321,18 +360,20 @@ class AsyncAnthropicVertex(BaseVertexClient[httpx.AsyncClient, AsyncStream[Any]]
     def copy(
         self,
         *,
-        region: str | NotGiven = NOT_GIVEN,
-        project_id: str | NotGiven = NOT_GIVEN,
+        region: str | NotGiven = not_given,
+        project_id: str | NotGiven = not_given,
         access_token: str | None = None,
         credentials: GoogleCredentials | None = None,
-        base_url: str | httpx.URL | None = None,
-        timeout: float | httpx.Timeout | None | NotGiven = NOT_GIVEN,
-        http_client: httpx.AsyncClient | None = None,
-        max_retries: int | NotGiven = NOT_GIVEN,
+        base_url: str | httpx2.URL | None = None,
+        timeout: float | httpx2.Timeout | None | NotGiven = not_given,
+        http_client: httpx2.AsyncClient | None = None,
+        max_retries: int | NotGiven = not_given,
+        open_telemetry: OpenTelemetryClientOption = None,
         default_headers: Mapping[str, str] | None = None,
         set_default_headers: Mapping[str, str] | None = None,
         default_query: Mapping[str, object] | None = None,
         set_default_query: Mapping[str, object] | None = None,
+        middleware: Sequence[MiddlewareInput] | None | NotGiven = not_given,
         _extra_kwargs: Mapping[str, Any] = {},
     ) -> Self:
         """
@@ -346,7 +387,7 @@ class AsyncAnthropicVertex(BaseVertexClient[httpx.AsyncClient, AsyncStream[Any]]
 
         headers = self._custom_headers
         if default_headers is not None:
-            headers = {**headers, **default_headers}
+            headers = merge_headers(headers, default_headers)
         elif set_default_headers is not None:
             headers = set_default_headers
 
@@ -360,15 +401,17 @@ class AsyncAnthropicVertex(BaseVertexClient[httpx.AsyncClient, AsyncStream[Any]]
 
         return self.__class__(
             region=region if is_given(region) else self.region,
-            project_id=project_id if is_given(project_id) else self.project_id or NOT_GIVEN,
+            project_id=project_id if is_given(project_id) else self.project_id or not_given,
             access_token=access_token or self.access_token,
             credentials=credentials or self.credentials,
             base_url=base_url or self.base_url,
             timeout=self.timeout if isinstance(timeout, NotGiven) else timeout,
             http_client=http_client,
             max_retries=max_retries if is_given(max_retries) else self.max_retries,
+            open_telemetry=self._copy_open_telemetry(open_telemetry),
             default_headers=headers,
             default_query=params,
+            middleware=self._middleware if isinstance(middleware, NotGiven) else middleware,
             **_extra_kwargs,
         )
 
@@ -376,12 +419,23 @@ class AsyncAnthropicVertex(BaseVertexClient[httpx.AsyncClient, AsyncStream[Any]]
     # client.with_options(timeout=10).foo.create(...)
     with_options = copy
 
+    def with_middleware(self, *middleware: MiddlewareInput) -> Self:
+        """A new client with the given middleware appended after this client's middleware.
+
+        Convenience for applying extra middleware to a single request:
+
+        ```py
+        client.with_middleware(my_middleware).messages.create(...)
+        ```
+        """
+        return self.copy(middleware=[*self._middleware, *middleware])
+
 
 def _prepare_options(input_options: FinalRequestOptions, *, project_id: str | None, region: str) -> FinalRequestOptions:
-    options = model_copy(input_options, deep=True)
+    options = model_copy(_keep_client_header_params(input_options), deep=True)
 
     if is_dict(options.json_data):
-        options.json_data.setdefault("anthropic_version", DEFAULT_VERSION)
+        options.json_data.setdefault("anthropic_version", ANTHROPIC_API_VERSION)
 
     if options.url in {"/v1/messages", "/v1/messages?beta=true"} and options.method == "post":
         if project_id is None:

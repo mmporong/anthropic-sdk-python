@@ -2,20 +2,29 @@ from __future__ import annotations
 
 import os
 import json
-import inspect
-from typing import Any, Set, Dict, TypeVar, cast
-from unittest import TestCase
+import base64
+import pathlib
+import threading
+from typing import Any, Set, Dict, List, Tuple, TypeVar, cast
 
-import httpx
+import httpx2
 import pytest
 from respx import MockRouter
 
 from anthropic import Anthropic, AsyncAnthropic
-from anthropic._compat import PYDANTIC_V1
+from anthropic._utils import assert_overloads_in_sync, assert_signatures_in_sync
+from anthropic._compat import PYDANTIC_V1, get_model_fields
 from anthropic.types.beta.beta_message import BetaMessage
-from anthropic.lib.streaming._beta_types import ParsedBetaMessageStreamEvent
+from anthropic.lib.streaming._beta_types import (
+    BetaInputJsonEvent,
+    BetaCompactionEvent,
+    ParsedBetaMessageStreamEvent,
+)
+from anthropic.types.beta.beta_tool_param import BetaToolParam
 from anthropic.resources.messages.messages import DEPRECATED_MODELS
 from anthropic.lib.streaming._beta_messages import TRACKS_TOOL_INPUT, BetaMessageStream, BetaAsyncMessageStream
+from anthropic.types.beta.beta_message_delta_usage import BetaMessageDeltaUsage
+from anthropic.types.beta.beta_raw_message_delta_event import Delta as BetaRawMessageDelta, BetaRawMessageDeltaEvent
 
 from .helpers import get_response, to_async_iter
 
@@ -26,6 +35,14 @@ sync_client = Anthropic(base_url=base_url, api_key=api_key, _strict_response_val
 async_client = AsyncAnthropic(base_url=base_url, api_key=api_key, _strict_response_validation=True)
 
 _T = TypeVar("_T")
+
+
+class WeatherTool:
+    """Stands in for a `@beta_tool` / toolset object: `tools=` takes anything with a `to_dict()`."""
+
+    def to_dict(self) -> BetaToolParam:
+        return {"name": "get_weather", "description": "Weather lookup.", "input_schema": {"type": "object"}}
+
 
 # Expected message fixtures
 EXPECTED_BASIC_MESSAGE = {
@@ -160,20 +177,89 @@ EXPECTED_INCOMPLETE_EVENT_TYPES = [
     "message_delta",
 ]
 
+EXPECTED_COMPACTION_MESSAGE = {
+    "id": "msg_01CompactionEncryptedContent01",
+    "model": "claude-opus-4-7",
+    "role": "assistant",
+    "stop_reason": "end_turn",
+    "type": "message",
+    "content": [
+        {
+            "type": "compaction",
+            "content": "Earlier conversation summarized.",
+            "encrypted_content": "EpwBCioIDxgCEAEYASJALd_opaque_compaction_payload",
+        },
+        {"type": "text", "text": "Hello there!"},
+    ],
+    "usage": {"input_tokens": 30, "output_tokens": 8},
+}
+
+EXPECTED_COMPACTION_EVENT_TYPES = [
+    "message_start",
+    "content_block_start",
+    "content_block_delta",
+    "compaction",
+    "content_block_stop",
+    "content_block_start",
+    "content_block_delta",
+    "text",
+    "content_block_stop",
+    "message_delta",
+]
+
+
+FOLLOW_UP_MESSAGE = {
+    "id": "msg_01FollowUp",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-sonnet-4-5",
+    "content": [{"type": "text", "text": "It is sunny in Paris."}],
+    "stop_reason": "end_turn",
+    "stop_sequence": None,
+    "usage": {"input_tokens": 400, "output_tokens": 10},
+}
+
+EXPECTED_TOOL_USE_PARAM = {
+    "type": "tool_use",
+    "id": "toolu_01NRLabsLyVHZPKxbKvkfSMn",
+    "name": "get_weather",
+    "input": {"location": "Paris"},
+    "caller": {"type": "direct"},
+}
+
 
 def assert_message_matches(message: BetaMessage, expected: Dict[str, Any]) -> None:
-    actual_message_json = message.model_dump_json(
-        indent=2, exclude_none=True, exclude={"content": {"__all__": {"__json_buf"}}}
-    )
+    actual_message_json = message.model_dump_json(indent=2, exclude_none=True)
 
-    test_case = TestCase()
-    test_case.maxDiff = None
-    test_case.assertEqual(expected, json.loads(actual_message_json))
+    assert json.loads(actual_message_json) == expected
 
 
 def assert_basic_response(events: list[ParsedBetaMessageStreamEvent], message: BetaMessage) -> None:
     assert_message_matches(message, EXPECTED_BASIC_MESSAGE)
     assert [e.type for e in events] == EXPECTED_BASIC_EVENT_TYPES
+
+
+def assert_unknown_events_response(events: list[ParsedBetaMessageStreamEvent], message: BetaMessage) -> None:
+    assert_message_matches(message, EXPECTED_BASIC_MESSAGE)
+    event_types: list[str] = [e.type for e in events]
+    assert event_types == [
+        "future_event",
+        "content_block_stop",
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "text",
+        "content_block_delta",
+        "text",
+        "content_block_delta",
+        "text",
+        "content_block_stop",
+        "future_event",
+        "message_delta",
+        "message_stop",
+        "future_event",
+    ]
+    assert events[0].to_dict() == {"type": "future_event", "usage": {"input_tokens": 99, "output_tokens": 99}}
 
 
 def assert_tool_use_response(events: list[ParsedBetaMessageStreamEvent], message: BetaMessage) -> None:
@@ -186,11 +272,150 @@ def assert_incomplete_partial_input_response(events: list[ParsedBetaMessageStrea
     assert [e.type for e in events] == EXPECTED_INCOMPLETE_EVENT_TYPES
 
 
+def assert_compaction_response(events: list[ParsedBetaMessageStreamEvent], message: BetaMessage) -> None:
+    assert_message_matches(message, EXPECTED_COMPACTION_MESSAGE)
+    assert [e.type for e in events] == EXPECTED_COMPACTION_EVENT_TYPES
+
+    # the emitted compaction event must carry encrypted_content, not just the accumulated block
+    compaction_events = [e for e in events if isinstance(e, BetaCompactionEvent)]
+    assert len(compaction_events) == 1
+    assert compaction_events[0].encrypted_content == "EpwBCioIDxgCEAEYASJALd_opaque_compaction_payload"
+
+
+def assert_refusal_response(message: BetaMessage) -> None:
+    assert message.stop_reason == "refusal"
+    assert message.stop_details is not None
+    assert message.stop_details.type == "refusal"
+    assert message.stop_details.category == "cyber"
+    assert message.stop_details.explanation == "This request was refused due to policy."
+
+
+EXPECTED_FALLBACK_EVENT_TYPES = [
+    "message_start",
+    "content_block_start",
+    "content_block_stop",
+    "content_block_start",
+    "content_block_delta",
+    "text",
+    "content_block_stop",
+    "message_delta",
+]
+
+
+def assert_fallback_response(events: list[ParsedBetaMessageStreamEvent], message: BetaMessage) -> None:
+    assert [e.type for e in events] == EXPECTED_FALLBACK_EVENT_TYPES
+
+    # `message_start` carried the declined model; the accumulated message must
+    # be relabeled to the serving model from the fallback block
+    assert message.model == "claude-sonnet-4-5"
+
+    assert message.content[0].type == "fallback"
+
+    text_block = message.content[1]
+    assert text_block.type == "text"
+    assert text_block.text == "Hello there!"
+
+
+EXPECTED_SERVER_TOOL_USE_EVENT_TYPES = [
+    "message_start",
+    "content_block_start",
+    *["content_block_delta", "input_json"] * 6,
+    "content_block_stop",
+    "content_block_start",
+    "content_block_stop",
+    "content_block_start",
+    "content_block_delta",
+    "citation",
+    "content_block_delta",
+    "text",
+    "content_block_delta",
+    "text",
+    "content_block_stop",
+    "message_delta",
+]
+
+
+def assert_server_tool_use_response(events: list[ParsedBetaMessageStreamEvent], message: BetaMessage) -> None:
+    assert [e.type for e in events] == EXPECTED_SERVER_TOOL_USE_EVENT_TYPES
+
+    server_tool_use = message.content[0]
+    assert server_tool_use.type == "server_tool_use"
+    assert server_tool_use.input == {"query": "anthropic claude release notes"}
+
+    # input_json events must fire for server_tool_use blocks, not just client tool_use
+    input_json_events = [e for e in events if isinstance(e, BetaInputJsonEvent)]
+    assert [e.partial_json for e in input_json_events] == [
+        "",
+        '{"query": "',
+        "anthropic cl",
+        "aude re",
+        "lease notes",
+        '"}',
+    ]
+    assert input_json_events[-1].snapshot == {"query": "anthropic claude release notes"}
+
+
+def assert_fallback_credit_response(message: BetaMessage) -> None:
+    # `message_delta` carried `usage.fallback_credit`; the accumulated final
+    # message must surface it rather than dropping it
+    assert message.usage.fallback_credit is not None
+    assert message.usage.fallback_credit.status.type == "redeemed"
+    assert message.usage.output_tokens == 8
+
+
+def assert_message_delta_fields_response(message: BetaMessage) -> None:
+    # every field the final `message_delta` carried must land on the accumulated message
+    assert message.container is not None
+    assert message.container.id == "container_01AbCdEfGh"
+    assert message.usage.output_tokens == 8
+    assert message.usage.input_tokens == 40
+    assert message.usage.cache_creation_input_tokens == 12
+    assert message.usage.cache_read_input_tokens == 7
+    assert message.usage.output_tokens_details is not None
+    assert message.usage.output_tokens_details.thinking_tokens == 3
+    assert message.usage.server_tool_use is not None
+    assert message.usage.server_tool_use.web_search_requests == 1
+    # never re-sent on `message_delta`, so these must survive from `message_start`
+    assert message.usage.service_tier == "standard"
+    assert message.usage.cache_creation is not None
+    assert message.usage.cache_creation.ephemeral_5m_input_tokens == 10
+
+
+def assert_context_management_response(message: BetaMessage) -> None:
+    # `context_management` is a top-level key of the `message_delta` event and is
+    # never sent on `message_start`, so the event is its only source
+    assert message.context_management is not None
+    applied_edit = message.context_management.applied_edits[0]
+    assert applied_edit.type == "clear_tool_uses_20250919"
+    assert applied_edit.cleared_tool_uses == 2
+    assert applied_edit.cleared_input_tokens == 1500
+
+
+# a `message_delta` array (mid-stream fallback) replaces the `message_start` value, even
+# when empty, while a delta without the key must leave the `message_start` value in place
+INPUT_TRANSFORMATIONS_CASES: List[Tuple[str, List[Dict[str, str]]]] = [
+    (
+        "input_transformations_delta_response.txt",
+        [{"type": "thinking_dropped", "path": "messages.0.content.0", "reason": "model_binding_mismatch"}],
+    ),
+    (
+        "input_transformations_start_only_response.txt",
+        [{"type": "thinking_dropped", "path": "messages.0.content.0", "reason": "model_binding_mismatch"}],
+    ),
+    ("input_transformations_empty_delta_response.txt", []),
+]
+
+
+def assert_input_transformations_response(message: BetaMessage, expected: List[Dict[str, str]]) -> None:
+    assert message.input_transformations is not None
+    assert [entry.to_dict() for entry in message.input_transformations] == expected
+
+
 class TestSyncMessages:
     @pytest.mark.respx(base_url=base_url)
     def test_basic_response(self, respx_mock: MockRouter) -> None:
         respx_mock.post("/v1/messages").mock(
-            return_value=httpx.Response(200, content=get_response("basic_response.txt"))
+            return_value=httpx2.Response(200, content=get_response("basic_response.txt"))
         )
 
         with sync_client.beta.messages.stream(
@@ -207,10 +432,31 @@ class TestSyncMessages:
 
             assert_basic_response([event for event in stream], stream.get_final_message())
 
+        assert respx_mock.calls.last.request.url.query == b""
+
+    @pytest.mark.parametrize("client", [False], indirect=True)
+    @pytest.mark.respx(base_url=base_url)
+    def test_unknown_events_are_passed_through(self, client: Anthropic, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=get_response("unknown_events_response.txt"))
+        )
+
+        with client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Say hello there!",
+                }
+            ],
+            model="claude-3-opus-latest",
+        ) as stream:
+            assert_unknown_events_response([event for event in stream], stream.get_final_message())
+
     @pytest.mark.respx(base_url=base_url)
     def test_tool_use(self, respx_mock: MockRouter) -> None:
         respx_mock.post("/v1/messages").mock(
-            return_value=httpx.Response(200, content=get_response("tool_use_response.txt"))
+            return_value=httpx2.Response(200, content=get_response("tool_use_response.txt"))
         )
 
         with sync_client.beta.messages.stream(
@@ -221,16 +467,71 @@ class TestSyncMessages:
                     "content": "Say hello there!",
                 }
             ],
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-5-5",
+            tools=[WeatherTool()],
         ) as stream:
             assert isinstance(cast(Any, stream), BetaMessageStream)
 
             assert_tool_use_response([event for event in stream], stream.get_final_message())
 
+        assert json.loads(respx_mock.calls.last.request.content)["tools"] == [WeatherTool().to_dict()]
+
+    @pytest.mark.respx(base_url=base_url)
+    def test_tool_use_round_trip(self, respx_mock: MockRouter) -> None:
+        route = respx_mock.post("/v1/messages").mock(
+            side_effect=[
+                httpx2.Response(200, content=get_response("tool_use_response.txt")),
+                httpx2.Response(200, json=FOLLOW_UP_MESSAGE),
+            ]
+        )
+
+        with sync_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "What is the weather in Paris?"}],
+            model="claude-sonnet-5-5",
+        ) as stream:
+            message = stream.get_final_message()
+
+        # accumulated blocks must be reusable as request params without leaking accumulator state
+        sync_client.beta.messages.create(
+            max_tokens=1024,
+            messages=[
+                {"role": "user", "content": "What is the weather in Paris?"},
+                {"role": "assistant", "content": message.content},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_01NRLabsLyVHZPKxbKvkfSMn", "content": "Sunny"}
+                    ],
+                },
+            ],
+            model="claude-sonnet-5-5",
+        )
+
+        request_body = json.loads(route.calls.last.request.content)
+        assert request_body["messages"][1]["content"][1] == EXPECTED_TOOL_USE_PARAM
+
+    @pytest.mark.respx(base_url=base_url)
+    def test_server_tool_use(self, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=get_response("server_tool_use_response.txt"))
+        )
+
+        with sync_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-sonnet-5-5",
+        ) as stream:
+            assert_server_tool_use_response([event for event in stream], stream.get_final_message())
+
     @pytest.mark.respx(base_url=base_url)
     def test_context_manager(self, respx_mock: MockRouter) -> None:
         respx_mock.post("/v1/messages").mock(
-            return_value=httpx.Response(200, content=get_response("basic_response.txt"))
+            return_value=httpx2.Response(
+                200,
+                headers={"request-id": "my-req-id", "anthropic-workspace-id": "wrkspc_123"},
+                content=get_response("basic_response.txt"),
+            )
         )
 
         with sync_client.beta.messages.stream(
@@ -244,6 +545,8 @@ class TestSyncMessages:
             model="claude-3-opus-latest",
         ) as stream:
             assert not stream.response.is_closed
+            assert stream.request_id == "my-req-id"
+            assert stream.workspace_id == "wrkspc_123"
 
         # response should be closed even if the body isn't read
         assert stream.response.is_closed
@@ -252,7 +555,7 @@ class TestSyncMessages:
     def test_deprecated_model_warning_stream(self, respx_mock: MockRouter) -> None:
         for deprecated_model in DEPRECATED_MODELS:
             respx_mock.post("/v1/messages").mock(
-                return_value=httpx.Response(200, content=get_response("basic_response.txt"))
+                return_value=httpx2.Response(200, content=get_response("basic_response.txt"))
             )
 
             with pytest.warns(DeprecationWarning, match=f"The model '{deprecated_model}' is deprecated"):
@@ -264,13 +567,172 @@ class TestSyncMessages:
                     # Consume the stream to ensure the warning is triggered
                     stream.until_done()
 
+    @pytest.mark.respx(base_url=base_url)
+    def test_refusal_stop_details_propagated(self, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=get_response("refusal_response.txt"))
+        )
+
+        with sync_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-opus-4-7",
+        ) as stream:
+            assert_refusal_response(stream.get_final_message())
+
+    @pytest.mark.respx(base_url=base_url)
+    @pytest.mark.filterwarnings("error")
+    def test_message_stop_event_serialization(self, respx_mock: MockRouter) -> None:
+        # trailing blank line terminates the final `message_stop` SSE so it is dispatched
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=iter([*get_response("basic_response.txt"), b"\n"]))
+        )
+
+        with sync_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-opus-4-7",
+        ) as stream:
+            stop_event = [event for event in stream][-1]
+
+        assert stop_event.type == "message_stop"
+        assert stop_event.message.content[0].type == "text"
+        # must not emit `PydanticSerializationUnexpectedValue` warnings
+        stop_event.model_dump()
+        stop_event.model_dump_json()
+
+    @pytest.mark.respx(base_url=base_url)
+    def test_compaction(self, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=get_response("compaction_response.txt"))
+        )
+
+        with sync_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-opus-4-7",
+        ) as stream:
+            assert isinstance(cast(Any, stream), BetaMessageStream)
+
+            assert_compaction_response([event for event in stream], stream.get_final_message())
+
+    @pytest.mark.respx(base_url=base_url)
+    def test_fallback_relabels_model(self, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=get_response("fallback_response.txt"))
+        )
+
+        with sync_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-opus-4-7",
+        ) as stream:
+            assert isinstance(cast(Any, stream), BetaMessageStream)
+
+            assert_fallback_response([event for event in stream], stream.get_final_message())
+
+    @pytest.mark.respx(base_url=base_url)
+    def test_fallback_credit_usage_propagated(self, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=get_response("fallback_credit_response.txt"))
+        )
+
+        with sync_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-sonnet-5-5",
+        ) as stream:
+            assert_fallback_credit_response(stream.get_final_message())
+
+    @pytest.mark.respx(base_url=base_url)
+    def test_message_delta_fields_propagated(self, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=get_response("message_delta_fields_response.txt"))
+        )
+
+        with sync_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-sonnet-5-5",
+        ) as stream:
+            assert_message_delta_fields_response(stream.get_final_message())
+
+    @pytest.mark.respx(base_url=base_url)
+    def test_context_management_propagated(self, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=get_response("context_management_response.txt"))
+        )
+
+        with sync_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-sonnet-5-5",
+        ) as stream:
+            assert_context_management_response(stream.get_final_message())
+
+    @pytest.mark.respx(base_url=base_url)
+    @pytest.mark.parametrize("fixture, expected", INPUT_TRANSFORMATIONS_CASES)
+    def test_input_transformations_propagated(
+        self, respx_mock: MockRouter, fixture: str, expected: List[Dict[str, str]]
+    ) -> None:
+        respx_mock.post("/v1/messages").mock(return_value=httpx2.Response(200, content=get_response(fixture)))
+
+        with sync_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-sonnet-5-5",
+        ) as stream:
+            assert_input_transformations_response(stream.get_final_message(), expected)
+
 
 class TestAsyncMessages:
     @pytest.mark.asyncio
     @pytest.mark.respx(base_url=base_url)
+    async def test_file_input_is_read_when_the_stream_is_entered(
+        self, respx_mock: MockRouter, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        route = respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=to_async_iter(get_response("basic_response.txt")))
+        )
+        image = tmp_path / "image.png"
+        image.write_bytes(b"image")
+        loop_thread = threading.current_thread()
+        read_on_loop_thread: list[bool] = []
+        read_bytes = pathlib.Path.read_bytes
+
+        def observed_read_bytes(self: pathlib.Path) -> bytes:
+            read_on_loop_thread.append(threading.current_thread() is loop_thread)
+            return read_bytes(self)
+
+        monkeypatch.setattr(pathlib.Path, "read_bytes", observed_read_bytes)
+
+        manager = async_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image}}
+                    ],
+                }
+            ],
+            model="claude-3-opus-latest",
+        )
+        # Creating the manager must not block the event loop on the file: the read is awaited once it is entered.
+        assert read_on_loop_thread == []
+
+        async with manager as stream:
+            await stream.until_done()
+
+        assert read_on_loop_thread == [False]
+        sent = json.loads(route.calls.last.request.content)
+        assert sent["messages"][0]["content"][0]["source"]["data"] == base64.b64encode(b"image").decode()
+
+    @pytest.mark.asyncio
+    @pytest.mark.respx(base_url=base_url)
     async def test_basic_response(self, respx_mock: MockRouter) -> None:
         respx_mock.post("/v1/messages").mock(
-            return_value=httpx.Response(200, content=to_async_iter(get_response("basic_response.txt")))
+            return_value=httpx2.Response(200, content=to_async_iter(get_response("basic_response.txt")))
         )
 
         async with async_client.beta.messages.stream(
@@ -281,17 +743,45 @@ class TestAsyncMessages:
                     "content": "Say hello there!",
                 }
             ],
-            model="claude-opus-4-0",
+            model="claude-opus-4-5",
         ) as stream:
             assert isinstance(cast(Any, stream), BetaAsyncMessageStream)
 
             assert_basic_response([event async for event in stream], await stream.get_final_message())
 
+        assert respx_mock.calls.last.request.url.query == b""
+
+    @pytest.mark.parametrize("async_client", [False], indirect=True)
+    @pytest.mark.asyncio
+    @pytest.mark.respx(base_url=base_url)
+    async def test_unknown_events_are_passed_through(
+        self, async_client: AsyncAnthropic, respx_mock: MockRouter
+    ) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=to_async_iter(get_response("unknown_events_response.txt")))
+        )
+
+        async with async_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Say hello there!",
+                }
+            ],
+            model="claude-opus-4-5",
+        ) as stream:
+            assert_unknown_events_response([event async for event in stream], await stream.get_final_message())
+
     @pytest.mark.asyncio
     @pytest.mark.respx(base_url=base_url)
     async def test_context_manager(self, respx_mock: MockRouter) -> None:
         respx_mock.post("/v1/messages").mock(
-            return_value=httpx.Response(200, content=to_async_iter(get_response("basic_response.txt")))
+            return_value=httpx2.Response(
+                200,
+                headers={"request-id": "my-req-id", "anthropic-workspace-id": "wrkspc_123"},
+                content=to_async_iter(get_response("basic_response.txt")),
+            )
         )
 
         async with async_client.beta.messages.stream(
@@ -305,6 +795,8 @@ class TestAsyncMessages:
             model="claude-3-opus-latest",
         ) as stream:
             assert not stream.response.is_closed
+            assert stream.request_id == "my-req-id"
+            assert stream.workspace_id == "wrkspc_123"
 
         # response should be closed even if the body isn't read
         assert stream.response.is_closed
@@ -314,7 +806,7 @@ class TestAsyncMessages:
     async def test_deprecated_model_warning_stream(self, respx_mock: MockRouter) -> None:
         for deprecated_model in DEPRECATED_MODELS:
             respx_mock.post("/v1/messages").mock(
-                return_value=httpx.Response(200, content=to_async_iter(get_response("basic_response.txt")))
+                return_value=httpx2.Response(200, content=to_async_iter(get_response("basic_response.txt")))
             )
 
             with pytest.warns(DeprecationWarning, match=f"The model '{deprecated_model}' is deprecated"):
@@ -330,7 +822,7 @@ class TestAsyncMessages:
     @pytest.mark.respx(base_url=base_url)
     async def test_tool_use(self, respx_mock: MockRouter) -> None:
         respx_mock.post("/v1/messages").mock(
-            return_value=httpx.Response(200, content=to_async_iter(get_response("tool_use_response.txt")))
+            return_value=httpx2.Response(200, content=to_async_iter(get_response("tool_use_response.txt")))
         )
 
         async with async_client.beta.messages.stream(
@@ -341,17 +833,34 @@ class TestAsyncMessages:
                     "content": "Say hello there!",
                 }
             ],
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-5-5",
+            tools=[WeatherTool()],
         ) as stream:
             assert isinstance(cast(Any, stream), BetaAsyncMessageStream)
 
             assert_tool_use_response([event async for event in stream], await stream.get_final_message())
 
+        assert json.loads(respx_mock.calls.last.request.content)["tools"] == [WeatherTool().to_dict()]
+
+    @pytest.mark.asyncio
+    @pytest.mark.respx(base_url=base_url)
+    async def test_server_tool_use(self, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=to_async_iter(get_response("server_tool_use_response.txt")))
+        )
+
+        async with async_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-sonnet-5-5",
+        ) as stream:
+            assert_server_tool_use_response([event async for event in stream], await stream.get_final_message())
+
     @pytest.mark.asyncio
     @pytest.mark.respx(base_url=base_url)
     async def test_incomplete_response(self, respx_mock: MockRouter) -> None:
         respx_mock.post("/v1/messages").mock(
-            return_value=httpx.Response(
+            return_value=httpx2.Response(
                 200, content=to_async_iter(get_response("incomplete_partial_json_response.txt"))
             )
         )
@@ -364,7 +873,7 @@ class TestAsyncMessages:
                     "content": "Say hello there!",
                 }
             ],
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-5-5",
         ) as stream:
             assert isinstance(cast(Any, stream), BetaAsyncMessageStream)
 
@@ -372,46 +881,196 @@ class TestAsyncMessages:
                 [event async for event in stream], await stream.get_final_message()
             )
 
+    @pytest.mark.asyncio
+    @pytest.mark.respx(base_url=base_url)
+    async def test_refusal_stop_details_propagated(self, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=to_async_iter(get_response("refusal_response.txt")))
+        )
+
+        async with async_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-opus-4-7",
+        ) as stream:
+            assert_refusal_response(await stream.get_final_message())
+
+    @pytest.mark.asyncio
+    @pytest.mark.respx(base_url=base_url)
+    @pytest.mark.filterwarnings("error")
+    async def test_message_stop_event_serialization(self, respx_mock: MockRouter) -> None:
+        # trailing blank line terminates the final `message_stop` SSE so it is dispatched
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=to_async_iter(iter([*get_response("basic_response.txt"), b"\n"])))
+        )
+
+        async with async_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-opus-4-7",
+        ) as stream:
+            stop_event = [event async for event in stream][-1]
+
+        assert stop_event.type == "message_stop"
+        assert stop_event.message.content[0].type == "text"
+        # must not emit `PydanticSerializationUnexpectedValue` warnings
+        stop_event.model_dump()
+        stop_event.model_dump_json()
+
+    @pytest.mark.asyncio
+    @pytest.mark.respx(base_url=base_url)
+    async def test_compaction(self, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=to_async_iter(get_response("compaction_response.txt")))
+        )
+
+        async with async_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-opus-4-7",
+        ) as stream:
+            assert isinstance(cast(Any, stream), BetaAsyncMessageStream)
+
+            assert_compaction_response([event async for event in stream], await stream.get_final_message())
+
+    @pytest.mark.asyncio
+    @pytest.mark.respx(base_url=base_url)
+    async def test_fallback_relabels_model(self, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=to_async_iter(get_response("fallback_response.txt")))
+        )
+
+        async with async_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-opus-4-7",
+        ) as stream:
+            assert isinstance(cast(Any, stream), BetaAsyncMessageStream)
+
+            assert_fallback_response([event async for event in stream], await stream.get_final_message())
+
+    @pytest.mark.asyncio
+    @pytest.mark.respx(base_url=base_url)
+    async def test_fallback_credit_usage_propagated(self, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=to_async_iter(get_response("fallback_credit_response.txt")))
+        )
+
+        async with async_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-sonnet-5-5",
+        ) as stream:
+            assert_fallback_credit_response(await stream.get_final_message())
+
+    @pytest.mark.asyncio
+    @pytest.mark.respx(base_url=base_url)
+    async def test_message_delta_fields_propagated(self, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=to_async_iter(get_response("message_delta_fields_response.txt")))
+        )
+
+        async with async_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-sonnet-5-5",
+        ) as stream:
+            assert_message_delta_fields_response(await stream.get_final_message())
+
+    @pytest.mark.asyncio
+    @pytest.mark.respx(base_url=base_url)
+    async def test_context_management_propagated(self, respx_mock: MockRouter) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=to_async_iter(get_response("context_management_response.txt")))
+        )
+
+        async with async_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-sonnet-5-5",
+        ) as stream:
+            assert_context_management_response(await stream.get_final_message())
+
+    @pytest.mark.asyncio
+    @pytest.mark.respx(base_url=base_url)
+    @pytest.mark.parametrize("fixture, expected", INPUT_TRANSFORMATIONS_CASES)
+    async def test_input_transformations_propagated(
+        self, respx_mock: MockRouter, fixture: str, expected: List[Dict[str, str]]
+    ) -> None:
+        respx_mock.post("/v1/messages").mock(
+            return_value=httpx2.Response(200, content=to_async_iter(get_response(fixture)))
+        )
+
+        async with async_client.beta.messages.stream(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "Say hello there!"}],
+            model="claude-sonnet-5-5",
+        ) as stream:
+            assert_input_transformations_response(await stream.get_final_message(), expected)
+
+
+def test_message_delta_fields_are_all_accumulated() -> None:
+    # tripwire: handle a new field in accumulate_event, then list it here
+    assert set(get_model_fields(BetaRawMessageDeltaEvent)) == {
+        "context_management",
+        "delta",
+        "input_transformations",
+        "type",
+        "usage",
+    }
+    assert set(get_model_fields(BetaRawMessageDelta)) == {
+        "container",
+        "stop_details",
+        "stop_reason",
+        "stop_sequence",
+    }
+    assert set(get_model_fields(BetaMessageDeltaUsage)) == {
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "fallback_credit",
+        "input_tokens",
+        "iterations",
+        "output_tokens",
+        "output_tokens_details",
+        "server_tool_use",
+    }
+
 
 @pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
 def test_stream_method_definition_in_sync(sync: bool) -> None:
     client: Anthropic | AsyncAnthropic = sync_client if sync else async_client
+    assert_signatures_in_sync(
+        client.beta.messages.create,
+        client.beta.messages.stream,
+        exclude_params={"stream", "output_format"},
+    )
 
-    sig = inspect.signature(client.beta.messages.stream)
-    generated_sig = inspect.signature(client.beta.messages.create)
 
-    errors: list[str] = []
+@pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
+def test_parse_method_definition_in_sync(sync: bool) -> None:
+    client: Anthropic | AsyncAnthropic = sync_client if sync else async_client
+    assert_signatures_in_sync(
+        client.beta.messages.create,
+        client.beta.messages.parse,
+        exclude_params={"stream", "output_format"},
+    )
 
-    for name, generated_param in generated_sig.parameters.items():
-        if name == "stream":
-            # intentionally excluded
-            continue
 
-        if name == "output_format":
-            continue
-
-        custom_param = sig.parameters.get(name)
-        if not custom_param:
-            errors.append(f"the `{name}` param is missing")
-            continue
-
-        if custom_param.annotation != generated_param.annotation:
-            errors.append(
-                f"types for the `{name}` param are do not match; generated={repr(generated_param.annotation)} custom={repr(custom_param.annotation)}"
-            )
-            continue
-
-    if errors:
-        raise AssertionError(
-            f"{len(errors)} errors encountered with the {'sync' if sync else 'async'} client `messages.stream()` method:\n\n"
-            + "\n\n".join(errors)
-        )
+@pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
+def test_tool_runner_method_definition_in_sync(sync: bool) -> None:
+    client: Anthropic | AsyncAnthropic = sync_client if sync else async_client
+    assert_overloads_in_sync(
+        client.beta.messages.create,
+        client.beta.messages.tool_runner,
+        # `thread` also accepts `False` on the runner to opt out of message threads
+        # A tool runner can't take `compaction`: every request of the loop would compact again.
+        exclude_params={"stream", "tools", "max_iterations", "output_format", "thread", "compaction"},
+    )
 
 
 # go through all the ContentBlock types to make sure the type alias is up to date
 # with any type that has an input property of type object
 def test_tracks_tool_input_type_alias_is_up_to_date() -> None:
-    # only run this on Pydantic v2
     if PYDANTIC_V1:
         pytest.skip("This test is only applicable for Pydantic v2")
     from typing import get_args
@@ -420,24 +1079,18 @@ def test_tracks_tool_input_type_alias_is_up_to_date() -> None:
 
     from anthropic.types.beta.beta_content_block import BetaContentBlock
 
-    # Get the content block union type
     content_block_union = get_args(BetaContentBlock)[0]
 
-    # Get all types from BetaContentBlock union
     content_block_types = get_args(content_block_union)
 
-    # Types that should have an input property
     types_with_input: Set[Any] = set()
 
-    # Check each type to see if it has an input property in its model_fields
     for block_type in content_block_types:
         if issubclass(block_type, BaseModel) and "input" in block_type.model_fields:
             types_with_input.add(block_type)
 
-    # Get the types included in TRACKS_TOOL_INPUT
     tracked_types = TRACKS_TOOL_INPUT
 
-    # Make sure all types with input are tracked
     for block_type in types_with_input:
         assert block_type in tracked_types, (
             f"ContentBlock type {block_type.__name__} has an input property, "

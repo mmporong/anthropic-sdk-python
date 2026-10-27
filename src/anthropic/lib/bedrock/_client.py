@@ -1,54 +1,53 @@
 from __future__ import annotations
 
 import os
-import logging
 import urllib.parse
-from typing import Any, Union, Mapping, TypeVar
+from typing import Any, Union, Mapping, TypeVar, Sequence
 from typing_extensions import Self, override
 
-import httpx
+import httpx2
 
 from ... import _exceptions
 from ._beta import Beta, AsyncBeta
-from ..._types import NOT_GIVEN, Timeout, NotGiven
-from ..._utils import is_dict, is_given
+from ..._types import Timeout, NotGiven, OpenTelemetryClientOption, not_given
+from ..._utils import is_dict, asyncify, is_given
+from ..._client import _keep_client_header_params
 from ..._compat import model_copy
 from ..._version import __version__
+from ..._constants import ANTHROPIC_API_VERSION
 from ..._streaming import Stream, AsyncStream
 from ..._exceptions import AnthropicError, APIStatusError
+from ..._middleware import MiddlewareInput
 from ..._base_client import (
     DEFAULT_MAX_RETRIES,
     BaseClient,
     SyncAPIClient,
     AsyncAPIClient,
     FinalRequestOptions,
+    build_headers,
+    merge_headers,
 )
 from ._stream_decoder import AWSEventStreamDecoder
 from ...resources.messages import Messages, AsyncMessages
-from ...resources.completions import Completions, AsyncCompletions
 
-log: logging.Logger = logging.getLogger(__name__)
-
-DEFAULT_VERSION = "bedrock-2023-05-31"
-
-_HttpxClientT = TypeVar("_HttpxClientT", bound=Union[httpx.Client, httpx.AsyncClient])
+_HttpxClientT = TypeVar("_HttpxClientT", bound=Union[httpx2.Client, httpx2.AsyncClient])
 _DefaultStreamT = TypeVar("_DefaultStreamT", bound=Union[Stream[Any], AsyncStream[Any]])
 
 
 def _prepare_options(input_options: FinalRequestOptions) -> FinalRequestOptions:
-    options = model_copy(input_options, deep=True)
+    options = model_copy(_keep_client_header_params(input_options), deep=True)
 
     if is_dict(options.json_data):
-        options.json_data.setdefault("anthropic_version", DEFAULT_VERSION)
+        options.json_data.setdefault("anthropic_version", ANTHROPIC_API_VERSION)
 
         if is_given(options.headers):
-            betas = options.headers.get("anthropic-beta")
+            betas = build_headers(options.headers)[0].get("anthropic-beta")
             if betas:
                 options.json_data.setdefault("anthropic_beta", betas.split(","))
 
-    if options.url in {"/v1/complete", "/v1/messages", "/v1/messages?beta=true"} and options.method == "post":
+    if options.url in {"/v1/messages", "/v1/messages?beta=true"} and options.method == "post":
         if not is_dict(options.json_data):
-            raise RuntimeError("Expected dictionary json_data for post /completions endpoint")
+            raise RuntimeError("Expected dictionary json_data for post /v1/messages endpoint")
 
         model = options.json_data.pop("model", None)
         model = urllib.parse.quote(str(model), safe=":")
@@ -67,37 +66,42 @@ def _prepare_options(input_options: FinalRequestOptions) -> FinalRequestOptions:
     return options
 
 
-def _infer_region() -> str:
+def _infer_region(aws_profile: str | None) -> str:
     """
     Infer the AWS region from the environment variables or
     from the boto3 session if available.
     """
-    aws_region = os.environ.get("AWS_REGION")
-    if aws_region is None:
+    aws_region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if not aws_region:
         try:
             import boto3
 
-            session = boto3.Session()
+            session = boto3.Session(profile_name=aws_profile)
             if session.region_name:
                 aws_region = session.region_name
         except ImportError:
             pass
 
-    if aws_region is None:
-        log.warning("No AWS region specified, defaulting to us-east-1")
-        aws_region = "us-east-1"  # fall back to legacy behavior
+    if not aws_region:
+        raise ValueError(
+            "No AWS region was provided. Set the `aws_region` argument, the `AWS_REGION` / `AWS_DEFAULT_REGION` "
+            "environment variable, or configure a region for your AWS profile."
+        )
 
     return aws_region
 
 
 class BaseBedrockClient(BaseClient[_HttpxClientT, _DefaultStreamT]):
+    _gen_ai_provider_name = "aws.bedrock"
+    _otel_platform = "bedrock"
+
     @override
     def _make_status_error(
         self,
         err_msg: str,
         *,
         body: object,
-        response: httpx.Response,
+        response: httpx2.Response,
     ) -> APIStatusError:
         if response.status_code == 400:
             return _exceptions.BadRequestError(err_msg, response=response, body=body)
@@ -128,9 +132,8 @@ class BaseBedrockClient(BaseClient[_HttpxClientT, _DefaultStreamT]):
         return APIStatusError(err_msg, response=response, body=body)
 
 
-class AnthropicBedrock(BaseBedrockClient[httpx.Client, Stream[Any]], SyncAPIClient):
+class AnthropicBedrock(BaseBedrockClient[httpx2.Client, Stream[Any]], SyncAPIClient):
     messages: Messages
-    completions: Completions
     beta: Beta
 
     def __init__(
@@ -140,13 +143,18 @@ class AnthropicBedrock(BaseBedrockClient[httpx.Client, Stream[Any]], SyncAPIClie
         aws_region: str | None = None,
         aws_profile: str | None = None,
         aws_session_token: str | None = None,
-        base_url: str | httpx.URL | None = None,
-        timeout: float | httpx.Timeout | None | NotGiven = NOT_GIVEN,
+        api_key: str | None = None,
+        base_url: str | httpx2.URL | None = None,
+        timeout: float | httpx2.Timeout | None | NotGiven = not_given,
         max_retries: int = DEFAULT_MAX_RETRIES,
         default_headers: Mapping[str, str] | None = None,
         default_query: Mapping[str, object] | None = None,
+        # OpenTelemetry tracing of this client's API calls. `False` disables the spans, and
+        # `traces.content_mode` set to `"content"` adds the content of requests and responses to them.
+        open_telemetry: OpenTelemetryClientOption = None,
         # Configure a custom httpx client. See the [httpx documentation](https://www.python-httpx.org/api/#client) for more details.
-        http_client: httpx.Client | None = None,
+        http_client: httpx2.Client | None = None,
+        middleware: Sequence[MiddlewareInput] | None = None,
         # Enable or disable schema validation for data returned by the API.
         # When enabled an error APIResponseValidationError is raised
         # if the API responds with invalid data for the expected schema.
@@ -157,11 +165,27 @@ class AnthropicBedrock(BaseBedrockClient[httpx.Client, Stream[Any]], SyncAPIClie
         # part of our public interface in the future.
         _strict_response_validation: bool = False,
     ) -> None:
+        if api_key is None:
+            api_key = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+
+        has_aws_credentials = (
+            aws_access_key is not None
+            or aws_secret_key is not None
+            or aws_session_token is not None
+            or aws_profile is not None
+        )
+        if api_key is not None and has_aws_credentials:
+            raise ValueError(
+                "Cannot specify both `api_key` and AWS credentials (`aws_access_key`, `aws_secret_key`, `aws_session_token`, `aws_profile`)"
+            )
+
+        self.api_key: str | None = api_key
+
         self.aws_secret_key = aws_secret_key
 
         self.aws_access_key = aws_access_key
 
-        self.aws_region = _infer_region() if aws_region is None else aws_region
+        self.aws_region = _infer_region(aws_profile) if aws_region is None else aws_region
         self.aws_profile = aws_profile
 
         self.aws_session_token = aws_session_token
@@ -176,15 +200,16 @@ class AnthropicBedrock(BaseBedrockClient[httpx.Client, Stream[Any]], SyncAPIClie
             base_url=base_url,
             timeout=timeout,
             max_retries=max_retries,
+            open_telemetry=open_telemetry,
             custom_headers=default_headers,
             custom_query=default_query,
             http_client=http_client,
+            middleware=middleware,
             _strict_response_validation=_strict_response_validation,
         )
 
         self.beta = Beta(self)
         self.messages = Messages(self)
-        self.completions = Completions(self)
 
     @override
     def _make_sse_decoder(self) -> AWSEventStreamDecoder:
@@ -195,10 +220,14 @@ class AnthropicBedrock(BaseBedrockClient[httpx.Client, Stream[Any]], SyncAPIClie
         return _prepare_options(options)
 
     @override
-    def _prepare_request(self, request: httpx.Request) -> None:
+    def _prepare_request(self, request: httpx2.Request) -> None:
+        if self.api_key is not None:
+            request.headers["Authorization"] = f"Bearer {self.api_key}"
+            return
+
         from ._auth import get_auth_headers
 
-        data = request.read().decode()
+        data = request.read()
 
         headers = get_auth_headers(
             method=request.method,
@@ -207,7 +236,7 @@ class AnthropicBedrock(BaseBedrockClient[httpx.Client, Stream[Any]], SyncAPIClie
             aws_access_key=self.aws_access_key,
             aws_secret_key=self.aws_secret_key,
             aws_session_token=self.aws_session_token,
-            region=self.aws_region or "us-east-1",
+            region=self.aws_region,
             profile=self.aws_profile,
             data=data,
         )
@@ -220,14 +249,17 @@ class AnthropicBedrock(BaseBedrockClient[httpx.Client, Stream[Any]], SyncAPIClie
         aws_access_key: str | None = None,
         aws_region: str | None = None,
         aws_session_token: str | None = None,
-        base_url: str | httpx.URL | None = None,
-        timeout: float | Timeout | None | NotGiven = NOT_GIVEN,
-        http_client: httpx.Client | None = None,
-        max_retries: int | NotGiven = NOT_GIVEN,
+        api_key: str | None = None,
+        base_url: str | httpx2.URL | None = None,
+        timeout: float | Timeout | None | NotGiven = not_given,
+        http_client: httpx2.Client | None = None,
+        max_retries: int | NotGiven = not_given,
+        open_telemetry: OpenTelemetryClientOption = None,
         default_headers: Mapping[str, str] | None = None,
         set_default_headers: Mapping[str, str] | None = None,
         default_query: Mapping[str, object] | None = None,
         set_default_query: Mapping[str, object] | None = None,
+        middleware: Sequence[MiddlewareInput] | None | NotGiven = not_given,
         _extra_kwargs: Mapping[str, Any] = {},
     ) -> Self:
         """
@@ -241,7 +273,7 @@ class AnthropicBedrock(BaseBedrockClient[httpx.Client, Stream[Any]], SyncAPIClie
 
         headers = self._custom_headers
         if default_headers is not None:
-            headers = {**headers, **default_headers}
+            headers = merge_headers(headers, default_headers)
         elif set_default_headers is not None:
             headers = set_default_headers
 
@@ -256,12 +288,15 @@ class AnthropicBedrock(BaseBedrockClient[httpx.Client, Stream[Any]], SyncAPIClie
             aws_access_key=aws_access_key or self.aws_access_key,
             aws_region=aws_region or self.aws_region,
             aws_session_token=aws_session_token or self.aws_session_token,
+            api_key=api_key or self.api_key,
             base_url=base_url or self.base_url,
             timeout=self.timeout if isinstance(timeout, NotGiven) else timeout,
             http_client=http_client,
             max_retries=max_retries if is_given(max_retries) else self.max_retries,
+            open_telemetry=self._copy_open_telemetry(open_telemetry),
             default_headers=headers,
             default_query=params,
+            middleware=self._middleware if isinstance(middleware, NotGiven) else middleware,
             **_extra_kwargs,
         )
 
@@ -269,10 +304,20 @@ class AnthropicBedrock(BaseBedrockClient[httpx.Client, Stream[Any]], SyncAPIClie
     # client.with_options(timeout=10).foo.create(...)
     with_options = copy
 
+    def with_middleware(self, *middleware: MiddlewareInput) -> Self:
+        """A new client with the given middleware appended after this client's middleware.
 
-class AsyncAnthropicBedrock(BaseBedrockClient[httpx.AsyncClient, AsyncStream[Any]], AsyncAPIClient):
+        Convenience for applying extra middleware to a single request:
+
+        ```py
+        client.with_middleware(my_middleware).messages.create(...)
+        ```
+        """
+        return self.copy(middleware=[*self._middleware, *middleware])
+
+
+class AsyncAnthropicBedrock(BaseBedrockClient[httpx2.AsyncClient, AsyncStream[Any]], AsyncAPIClient):
     messages: AsyncMessages
-    completions: AsyncCompletions
     beta: AsyncBeta
 
     def __init__(
@@ -282,13 +327,18 @@ class AsyncAnthropicBedrock(BaseBedrockClient[httpx.AsyncClient, AsyncStream[Any
         aws_region: str | None = None,
         aws_profile: str | None = None,
         aws_session_token: str | None = None,
-        base_url: str | httpx.URL | None = None,
-        timeout: float | httpx.Timeout | None | NotGiven = NOT_GIVEN,
+        api_key: str | None = None,
+        base_url: str | httpx2.URL | None = None,
+        timeout: float | httpx2.Timeout | None | NotGiven = not_given,
         max_retries: int = DEFAULT_MAX_RETRIES,
         default_headers: Mapping[str, str] | None = None,
         default_query: Mapping[str, object] | None = None,
+        # OpenTelemetry tracing of this client's API calls. `False` disables the spans, and
+        # `traces.content_mode` set to `"content"` adds the content of requests and responses to them.
+        open_telemetry: OpenTelemetryClientOption = None,
         # Configure a custom httpx client. See the [httpx documentation](https://www.python-httpx.org/api/#client) for more details.
-        http_client: httpx.AsyncClient | None = None,
+        http_client: httpx2.AsyncClient | None = None,
+        middleware: Sequence[MiddlewareInput] | None = None,
         # Enable or disable schema validation for data returned by the API.
         # When enabled an error APIResponseValidationError is raised
         # if the API responds with invalid data for the expected schema.
@@ -299,11 +349,27 @@ class AsyncAnthropicBedrock(BaseBedrockClient[httpx.AsyncClient, AsyncStream[Any
         # part of our public interface in the future.
         _strict_response_validation: bool = False,
     ) -> None:
+        if api_key is None:
+            api_key = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+
+        has_aws_credentials = (
+            aws_access_key is not None
+            or aws_secret_key is not None
+            or aws_session_token is not None
+            or aws_profile is not None
+        )
+        if api_key is not None and has_aws_credentials:
+            raise ValueError(
+                "Cannot specify both `api_key` and AWS credentials (`aws_access_key`, `aws_secret_key`, `aws_session_token`, `aws_profile`)"
+            )
+
+        self.api_key: str | None = api_key
+
         self.aws_secret_key = aws_secret_key
 
         self.aws_access_key = aws_access_key
 
-        self.aws_region = _infer_region() if aws_region is None else aws_region
+        self.aws_region = _infer_region(aws_profile) if aws_region is None else aws_region
         self.aws_profile = aws_profile
 
         self.aws_session_token = aws_session_token
@@ -318,14 +384,15 @@ class AsyncAnthropicBedrock(BaseBedrockClient[httpx.AsyncClient, AsyncStream[Any
             base_url=base_url,
             timeout=timeout,
             max_retries=max_retries,
+            open_telemetry=open_telemetry,
             custom_headers=default_headers,
             custom_query=default_query,
             http_client=http_client,
+            middleware=middleware,
             _strict_response_validation=_strict_response_validation,
         )
 
         self.messages = AsyncMessages(self)
-        self.completions = AsyncCompletions(self)
         self.beta = AsyncBeta(self)
 
     @override
@@ -337,19 +404,23 @@ class AsyncAnthropicBedrock(BaseBedrockClient[httpx.AsyncClient, AsyncStream[Any
         return _prepare_options(options)
 
     @override
-    async def _prepare_request(self, request: httpx.Request) -> None:
+    async def _prepare_request(self, request: httpx2.Request) -> None:
+        if self.api_key is not None:
+            request.headers["Authorization"] = f"Bearer {self.api_key}"
+            return
+
         from ._auth import get_auth_headers
 
-        data = request.read().decode()
+        data = request.read()
 
-        headers = get_auth_headers(
+        headers = await asyncify(get_auth_headers)(
             method=request.method,
             url=str(request.url),
             headers=request.headers,
             aws_access_key=self.aws_access_key,
             aws_secret_key=self.aws_secret_key,
             aws_session_token=self.aws_session_token,
-            region=self.aws_region or "us-east-1",
+            region=self.aws_region,
             profile=self.aws_profile,
             data=data,
         )
@@ -362,14 +433,17 @@ class AsyncAnthropicBedrock(BaseBedrockClient[httpx.AsyncClient, AsyncStream[Any
         aws_access_key: str | None = None,
         aws_region: str | None = None,
         aws_session_token: str | None = None,
-        base_url: str | httpx.URL | None = None,
-        timeout: float | Timeout | None | NotGiven = NOT_GIVEN,
-        http_client: httpx.AsyncClient | None = None,
-        max_retries: int | NotGiven = NOT_GIVEN,
+        api_key: str | None = None,
+        base_url: str | httpx2.URL | None = None,
+        timeout: float | Timeout | None | NotGiven = not_given,
+        http_client: httpx2.AsyncClient | None = None,
+        max_retries: int | NotGiven = not_given,
+        open_telemetry: OpenTelemetryClientOption = None,
         default_headers: Mapping[str, str] | None = None,
         set_default_headers: Mapping[str, str] | None = None,
         default_query: Mapping[str, object] | None = None,
         set_default_query: Mapping[str, object] | None = None,
+        middleware: Sequence[MiddlewareInput] | None | NotGiven = not_given,
         _extra_kwargs: Mapping[str, Any] = {},
     ) -> Self:
         """
@@ -383,7 +457,7 @@ class AsyncAnthropicBedrock(BaseBedrockClient[httpx.AsyncClient, AsyncStream[Any
 
         headers = self._custom_headers
         if default_headers is not None:
-            headers = {**headers, **default_headers}
+            headers = merge_headers(headers, default_headers)
         elif set_default_headers is not None:
             headers = set_default_headers
 
@@ -398,15 +472,29 @@ class AsyncAnthropicBedrock(BaseBedrockClient[httpx.AsyncClient, AsyncStream[Any
             aws_access_key=aws_access_key or self.aws_access_key,
             aws_region=aws_region or self.aws_region,
             aws_session_token=aws_session_token or self.aws_session_token,
+            api_key=api_key or self.api_key,
             base_url=base_url or self.base_url,
             timeout=self.timeout if isinstance(timeout, NotGiven) else timeout,
             http_client=http_client,
             max_retries=max_retries if is_given(max_retries) else self.max_retries,
+            open_telemetry=self._copy_open_telemetry(open_telemetry),
             default_headers=headers,
             default_query=params,
+            middleware=self._middleware if isinstance(middleware, NotGiven) else middleware,
             **_extra_kwargs,
         )
 
     # Alias for `copy` for nicer inline usage, e.g.
     # client.with_options(timeout=10).foo.create(...)
     with_options = copy
+
+    def with_middleware(self, *middleware: MiddlewareInput) -> Self:
+        """A new client with the given middleware appended after this client's middleware.
+
+        Convenience for applying extra middleware to a single request:
+
+        ```py
+        client.with_middleware(my_middleware).messages.create(...)
+        ```
+        """
+        return self.copy(middleware=[*self._middleware, *middleware])

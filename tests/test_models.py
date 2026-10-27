@@ -1,15 +1,15 @@
 import json
-from typing import TYPE_CHECKING, Any, Dict, List, Union, Optional, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Union, Iterable, Optional, cast
 from datetime import datetime, timezone
-from typing_extensions import Literal, Annotated, TypeAliasType
+from collections import deque
+from typing_extensions import Literal, Annotated, TypedDict, TypeAliasType
 
 import pytest
 import pydantic
 from pydantic import Field
 
-from anthropic._utils import PropertyInfo
 from anthropic._compat import PYDANTIC_V1, parse_obj, model_dump, model_json
-from anthropic._models import DISCRIMINATOR_CACHE, BaseModel, construct_type
+from anthropic._models import DISCRIMINATOR_CACHE, BaseModel, EagerIterable, UnionDiscriminator, construct_type
 
 
 class BasicModel(BaseModel):
@@ -667,7 +667,7 @@ def test_discriminated_unions_invalid_data() -> None:
 
     m = construct_type(
         value={"type": "b", "data": "foo"},
-        type_=cast(Any, Annotated[Union[A, B], PropertyInfo(discriminator="type")]),
+        type_=cast(Any, Annotated[Union[A, B], UnionDiscriminator("type")]),
     )
     assert isinstance(m, B)
     assert m.type == "b"
@@ -675,7 +675,7 @@ def test_discriminated_unions_invalid_data() -> None:
 
     m = construct_type(
         value={"type": "a", "data": 100},
-        type_=cast(Any, Annotated[Union[A, B], PropertyInfo(discriminator="type")]),
+        type_=cast(Any, Annotated[Union[A, B], UnionDiscriminator("type")]),
     )
     assert isinstance(m, A)
     assert m.type == "a"
@@ -700,7 +700,7 @@ def test_discriminated_unions_unknown_variant() -> None:
 
     m = construct_type(
         value={"type": "c", "data": None, "new_thing": "bar"},
-        type_=cast(Any, Annotated[Union[A, B], PropertyInfo(discriminator="type")]),
+        type_=cast(Any, Annotated[Union[A, B], UnionDiscriminator("type")]),
     )
 
     # just chooses the first variant
@@ -728,7 +728,7 @@ def test_discriminated_unions_invalid_data_nested_unions() -> None:
 
     m = construct_type(
         value={"type": "b", "data": "foo"},
-        type_=cast(Any, Annotated[Union[Union[A, B], C], PropertyInfo(discriminator="type")]),
+        type_=cast(Any, Annotated[Union[Union[A, B], C], UnionDiscriminator("type")]),
     )
     assert isinstance(m, B)
     assert m.type == "b"
@@ -736,7 +736,7 @@ def test_discriminated_unions_invalid_data_nested_unions() -> None:
 
     m = construct_type(
         value={"type": "c", "data": "foo"},
-        type_=cast(Any, Annotated[Union[Union[A, B], C], PropertyInfo(discriminator="type")]),
+        type_=cast(Any, Annotated[Union[Union[A, B], C], UnionDiscriminator("type")]),
     )
     assert isinstance(m, C)
     assert m.type == "c"
@@ -756,7 +756,7 @@ def test_discriminated_unions_with_aliases_invalid_data() -> None:
 
     m = construct_type(
         value={"type": "b", "data": "foo"},
-        type_=cast(Any, Annotated[Union[A, B], PropertyInfo(discriminator="foo_type")]),
+        type_=cast(Any, Annotated[Union[A, B], UnionDiscriminator("foo_type")]),
     )
     assert isinstance(m, B)
     assert m.foo_type == "b"
@@ -764,7 +764,7 @@ def test_discriminated_unions_with_aliases_invalid_data() -> None:
 
     m = construct_type(
         value={"type": "a", "data": 100},
-        type_=cast(Any, Annotated[Union[A, B], PropertyInfo(discriminator="foo_type")]),
+        type_=cast(Any, Annotated[Union[A, B], UnionDiscriminator("foo_type")]),
     )
     assert isinstance(m, A)
     assert m.foo_type == "a"
@@ -789,7 +789,7 @@ def test_discriminated_unions_overlapping_discriminators_invalid_data() -> None:
 
     m = construct_type(
         value={"type": "a", "data": "foo"},
-        type_=cast(Any, Annotated[Union[A, B], PropertyInfo(discriminator="type")]),
+        type_=cast(Any, Annotated[Union[A, B], UnionDiscriminator("type")]),
     )
     assert isinstance(m, B)
     assert m.type == "a"
@@ -812,7 +812,7 @@ def test_discriminated_unions_invalid_data_uses_cache() -> None:
     assert not DISCRIMINATOR_CACHE.get(UnionType)
 
     m = construct_type(
-        value={"type": "b", "data": "foo"}, type_=cast(Any, Annotated[UnionType, PropertyInfo(discriminator="type")])
+        value={"type": "b", "data": "foo"}, type_=cast(Any, Annotated[UnionType, UnionDiscriminator("type")])
     )
     assert isinstance(m, B)
     assert m.type == "b"
@@ -822,7 +822,7 @@ def test_discriminated_unions_invalid_data_uses_cache() -> None:
     assert discriminator is not None
 
     m = construct_type(
-        value={"type": "b", "data": "foo"}, type_=cast(Any, Annotated[UnionType, PropertyInfo(discriminator="type")])
+        value={"type": "b", "data": "foo"}, type_=cast(Any, Annotated[UnionType, UnionDiscriminator("type")])
     )
     assert isinstance(m, B)
     assert m.type == "b"
@@ -833,10 +833,90 @@ def test_discriminated_unions_invalid_data_uses_cache() -> None:
     assert DISCRIMINATOR_CACHE.get(UnionType) is discriminator
 
 
+def test_discriminated_unions_pep604_uses_cache() -> None:
+    class A(BaseModel):
+        type: Literal["a"]
+
+        data: str
+
+    class B(BaseModel):
+        type: Literal["b"]
+
+        data: int
+
+    UnionType = cast(Any, A | B)
+    # `A | B` can't be weakly referenced before Python 3.14, so look up via the equal `Union[A, B]`
+    CacheKey = cast(Any, Union[A, B])
+
+    assert not DISCRIMINATOR_CACHE.get(CacheKey)
+
+    m = construct_type(
+        value={"type": "b", "data": "foo"}, type_=cast(Any, Annotated[UnionType, UnionDiscriminator("type")])
+    )
+    assert isinstance(m, B)
+    assert m.type == "b"
+    assert m.data == "foo"  # type: ignore[comparison-overlap]
+
+    discriminator = DISCRIMINATOR_CACHE.get(CacheKey)
+    assert discriminator is not None
+
+    m = construct_type(
+        value={"type": "a", "data": 0}, type_=cast(Any, Annotated[UnionType, UnionDiscriminator("type")])
+    )
+    assert isinstance(m, A)
+    assert DISCRIMINATOR_CACHE.get(CacheKey) is discriminator
+
+
+def test_pep604_union_field_invalid_data() -> None:
+    class A(BaseModel):
+        kind: Literal["a"]
+
+        data: str
+
+    class B(BaseModel):
+        kind: Literal["b"]
+
+        data: int
+
+    class Model(BaseModel):
+        item: A | B
+
+    # fails strict validation for both variants, so the union fallback in `construct_type` runs
+    m = Model.construct(item={"kind": "b", "data": "foo"})
+    assert isinstance(m, Model)
+    assert isinstance(m.item, (A, B))
+    assert m.item.data == "foo"
+
+    item = construct_type(value={"kind": "b", "data": "foo"}, type_=cast(Any, A | B))
+    assert isinstance(item, (A, B))
+
+
+def test_pep604_discriminated_union_in_optional_invalid_data() -> None:
+    class A(BaseModel):
+        type: Literal["a"]
+
+        data: str
+
+    class B(BaseModel):
+        type: Literal["b"]
+
+        data: int
+
+    # an enclosing `Optional` swallows errors from building the inner union and returns the raw data,
+    # so a failure here shows up as `m` being a dict rather than as an exception
+    m = construct_type(
+        value={"type": "b", "data": "foo"},
+        type_=cast(Any, Optional[Annotated[cast(Any, A | B), UnionDiscriminator("type")]]),
+    )
+    assert isinstance(m, B)
+    assert m.data == "foo"  # type: ignore[comparison-overlap]
+
+
+Alias = TypeAliasType("Alias", str)
+
+
 @pytest.mark.skipif(PYDANTIC_V1, reason="TypeAliasType is not supported in Pydantic v1")
 def test_type_alias_type() -> None:
-    Alias = TypeAliasType("Alias", str)  # pyright: ignore
-
     class Model(BaseModel):
         alias: Alias
         union: Union[int, Alias]
@@ -885,7 +965,7 @@ def test_discriminated_union_case() -> None:
     # when constructing ModelA | ModelB, value data doesn't match ModelB exactly - missing `required`
     m = construct_type(
         value={"type": "modelB", "data": {"type": "a", "data": True}},
-        type_=cast(Any, Annotated[Union[ModelA, ModelB], PropertyInfo(discriminator="type")]),
+        type_=cast(Any, Annotated[Union[ModelA, ModelB], UnionDiscriminator("type")]),
     )
 
     assert isinstance(m, ModelB)
@@ -909,7 +989,7 @@ def test_nested_discriminated_union() -> None:
                 InnerType1,
                 InnerType2,
             ],
-            PropertyInfo(discriminator="type"),
+            UnionDiscriminator("type"),
         ]
 
     class Type2(BaseModel):
@@ -920,7 +1000,7 @@ def test_nested_discriminated_union() -> None:
             Type1,
             Type2,
         ],
-        PropertyInfo(discriminator="base_type"),
+        UnionDiscriminator("base_type"),
     ]
 
     model = construct_type(
@@ -961,3 +1041,56 @@ def test_extra_properties() -> None:
     assert model.a.prop == 1
     assert isinstance(model.a, Item)
     assert model.other == "foo"
+
+
+# NOTE: Workaround for Pydantic Iterable behavior.
+# Iterable fields are replaced with a ValidatorIterator and may be consumed
+# during serialization, which can cause subsequent dumps to return empty data.
+# See: https://github.com/pydantic/pydantic/issues/9541
+@pytest.mark.parametrize(
+    "data, expected_validated",
+    [
+        ([1, 2, 3], [1, 2, 3]),
+        ((1, 2, 3), (1, 2, 3)),
+        (set([1, 2, 3]), set([1, 2, 3])),
+        (iter([1, 2, 3]), [1, 2, 3]),
+        ([], []),
+        ((x for x in [1, 2, 3]), [1, 2, 3]),
+        (map(lambda x: x, [1, 2, 3]), [1, 2, 3]),
+        (frozenset([1, 2, 3]), frozenset([1, 2, 3])),
+        (deque([1, 2, 3]), deque([1, 2, 3])),
+    ],
+    ids=["list", "tuple", "set", "iterator", "empty", "generator", "map", "frozenset", "deque"],
+)
+@pytest.mark.skipif(PYDANTIC_V1, reason="this is only supported in pydantic v2")
+def test_iterable_construction(data: Iterable[int], expected_validated: Iterable[int]) -> None:
+    class TypeWithIterable(TypedDict):
+        items: EagerIterable[int]
+
+    class Model(BaseModel):
+        data: TypeWithIterable
+
+    m = Model.model_validate({"data": {"items": data}})
+    assert m.data["items"] == expected_validated
+
+    # Verify repeated dumps don't lose data (the original bug)
+    assert m.model_dump()["data"]["items"] == list(expected_validated)
+    assert m.model_dump()["data"]["items"] == list(expected_validated)
+
+
+@pytest.mark.skipif(PYDANTIC_V1, reason="this is only supported in pydantic v2")
+def test_iterable_construction_str_falls_back_to_list() -> None:
+    # str is iterable (over chars), but str(list_of_chars) produces the list's repr
+    # rather than reconstructing a string from items. We special-case str to fall
+    # back to list instead of attempting reconstruction.
+    class TypeWithIterable(TypedDict):
+        items: EagerIterable[str]
+
+    class Model(BaseModel):
+        data: TypeWithIterable
+
+    m = Model.model_validate({"data": {"items": "hello"}})
+
+    # falls back to list of chars rather than calling str(["h", "e", "l", "l", "o"])
+    assert m.data["items"] == ["h", "e", "l", "l", "o"]
+    assert m.model_dump()["data"]["items"] == ["h", "e", "l", "l", "o"]

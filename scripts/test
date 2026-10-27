@@ -14,11 +14,11 @@ function steady_is_running() {
 }
 
 kill_server_on_port() {
-  pids=$(lsof -t -i tcp:"$1" || echo "")
-  if [ "$pids" != "" ]; then
-    kill "$pids"
-    echo "Stopped $pids."
-  fi
+  pids=$(lsof -t -i tcp:"$1" -sTCP:LISTEN || echo "")
+  for pid in $pids; do
+    kill "$pid"
+    echo "Stopped process $pid on port $1."
+  done
 }
 
 function is_overriding_api_base_url() {
@@ -43,7 +43,7 @@ elif ! steady_is_running ; then
   echo -e "To run the server, pass in the path or url of your OpenAPI"
   echo -e "spec to the steady command:"
   echo
-  echo -e "  \$ ${YELLOW}npm exec --package=@stdy/cli@0.19.3 -- steady path/to/your.openapi.yml --host 127.0.0.1 -p 4010 --validator-query-array-format=comma --validator-query-object-format=brackets${NC}"
+  echo -e "  \$ ${YELLOW}npm exec --package=@stdy/cli@0.22.2 -- steady path/to/your.openapi.yml --host 127.0.0.1 -p 4010 --validator-query-array-format=brackets --validator-form-array-format=brackets --validator-query-object-format=brackets --validator-form-object-format=brackets${NC}"
   echo
 
   exit 1
@@ -56,7 +56,7 @@ export DEFER_PYDANTIC_BUILD=false
 
 # Note that we need to specify the patch version here so that uv
 # won't use unstable (alpha, beta, rc) releases for the tests
-PY_VERSION_MIN=">=3.9.0"
+PY_VERSION_MIN=">=3.10.0"
 PY_VERSION_MAX=">=3.14.0"
 
 function run_tests() {
@@ -69,6 +69,12 @@ function run_tests() {
         uv run --isolated --all-extras --no-extra=mcp --group=pydantic-v1 pytest "$@"
     fi
 
+    # The lockfile pins one mcp major; also run the mcp tests against the other one
+    # (mcp requires Python 3.10+, so skip on the minimum version)
+    if [[ "$UV_PYTHON" != "$PY_VERSION_MIN" ]]; then
+        echo "==> Running MCP tests with mcp v2"
+        uv run --isolated --all-extras --with 'mcp>=2' pytest tests/lib/tools/test_mcp_tool.py
+    fi
 }
 
 # If UV_PYTHON is already set in the environment, just run the command once

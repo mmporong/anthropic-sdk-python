@@ -1,4 +1,4 @@
-# File generated from our OpenAPI spec by Stainless. See CONTRIBUTING.md for details.
+from typing import Optional
 
 from .._models import BaseModel
 from .capability_support import CapabilitySupport
@@ -23,3 +23,6 @@ class EffortCapability(BaseModel):
 
     supported: bool
     """Whether this capability is supported by the model."""
+
+    xhigh: Optional[CapabilitySupport] = None
+    """Whether the model supports xhigh effort level."""

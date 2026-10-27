@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from typing import Iterator
 from pathlib import Path
@@ -51,6 +52,27 @@ def get_directory_snapshot(base_path: str) -> dict[str, str]:
 
 
 class TestBetaLocalFilesystemMemoryTool:
+    def test_mkdir_parents_not_world_writable_under_permissive_umask(self) -> None:
+        if os.name != "posix":
+            pytest.skip("POSIX mode bits only")
+        # Permissive umask: newly created dirs would default to 0o777 unless an
+        # explicit mode is enforced on every component of the tree.
+        old_umask = os.umask(0)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                # base_path's parent ("nested") does NOT exist yet, so the tool must
+                # create it as an intermediate parent. The bug: pathlib applies the
+                # 0o700 mode only to the leaf, leaving these intermediate parents at
+                # the umask default (0o777 here) — world-writable.
+                base_path = Path(tmp) / "nested" / "memory"
+                tool = BetaLocalFilesystemMemoryTool(base_path=str(base_path))
+                for directory in (base_path.parent, base_path, tool.memory_root):
+                    mode = stat.S_IMODE(directory.stat().st_mode)
+                    assert mode == 0o700, f"{directory} has mode {oct(mode)}, expected 0o700"
+                    assert not (mode & 0o077), f"{directory} is group/other-accessible: {oct(mode)}"
+        finally:
+            os.umask(old_umask)
+
     def test_create(self, sync_local_filesystem_tool: BetaLocalFilesystemMemoryTool) -> None:
         result = sync_local_filesystem_tool.create(
             BetaMemoryTool20250818CreateCommand(
@@ -319,6 +341,43 @@ class TestBetaLocalFilesystemMemoryTool:
         dir_snapshot = get_directory_snapshot(str(sync_local_filesystem_tool.base_path))
         assert dir_snapshot == {"memories/insert_test.txt": "Line 1\nLine 2\nLast Line\n"}
 
+    def test_view_preserves_crlf_line_endings(self, sync_local_filesystem_tool: BetaLocalFilesystemMemoryTool) -> None:
+        (sync_local_filesystem_tool.memory_root / "crlf.txt").write_bytes(b"line1\r\nline2\r\nline3\r\n")
+
+        result = sync_local_filesystem_tool.view(
+            BetaMemoryTool20250818ViewCommand(command="view", path="/memories/crlf.txt")
+        )
+        assert (
+            result
+            == "Here's the content of /memories/crlf.txt with line numbers:\n     1\tline1\r\n     2\tline2\r\n     3\tline3\r\n     4\t"
+        )
+
+    def test_str_replace_preserves_crlf_line_endings(
+        self, sync_local_filesystem_tool: BetaLocalFilesystemMemoryTool
+    ) -> None:
+        path = sync_local_filesystem_tool.memory_root / "crlf.txt"
+        path.write_bytes(b"line1\r\nline2\r\nline3\r\n")
+
+        sync_local_filesystem_tool.str_replace(
+            BetaMemoryTool20250818StrReplaceCommand(
+                command="str_replace", path="/memories/crlf.txt", old_str="line2", new_str="LINE2"
+            )
+        )
+        assert path.read_bytes() == b"line1\r\nLINE2\r\nline3\r\n"
+
+    def test_insert_preserves_crlf_line_endings(
+        self, sync_local_filesystem_tool: BetaLocalFilesystemMemoryTool
+    ) -> None:
+        path = sync_local_filesystem_tool.memory_root / "crlf.txt"
+        path.write_bytes(b"line1\r\nline2\r\nline3\r\n")
+
+        sync_local_filesystem_tool.insert(
+            BetaMemoryTool20250818InsertCommand(
+                command="insert", path="/memories/crlf.txt", insert_line=1, insert_text="Inserted"
+            )
+        )
+        assert path.read_bytes() == b"line1\r\nInserted\nline2\r\nline3\r\n"
+
     def test_insert_error_for_non_existent_file(
         self, sync_local_filesystem_tool: BetaLocalFilesystemMemoryTool
     ) -> None:
@@ -518,6 +577,23 @@ class TestBetaLocalFilesystemMemoryTool:
 
 
 class TestBetaAsyncLocalFilesystemMemoryTool:
+    async def test_mkdir_parents_not_world_writable_under_permissive_umask(self) -> None:
+        if os.name != "posix":
+            pytest.skip("POSIX mode bits only")
+        old_umask = os.umask(0)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                base_path = Path(tmp) / "nested" / "memory"
+                tool = BetaAsyncLocalFilesystemMemoryTool(base_path=str(base_path))
+                await tool._ensure_memory_root()  # triggers lazy directory creation
+                memory_root = Path(str(tool.memory_root))
+                for directory in (base_path.parent, base_path, memory_root):
+                    mode = stat.S_IMODE(directory.stat().st_mode)
+                    assert mode == 0o700, f"{directory} has mode {oct(mode)}, expected 0o700"
+                    assert not (mode & 0o077), f"{directory} is group/other-accessible: {oct(mode)}"
+        finally:
+            os.umask(old_umask)
+
     async def test_create(self, async_local_filesystem_tool: BetaAsyncLocalFilesystemMemoryTool) -> None:
         result = await async_local_filesystem_tool.create(
             BetaMemoryTool20250818CreateCommand(
@@ -792,6 +868,51 @@ class TestBetaAsyncLocalFilesystemMemoryTool:
         dir_snapshot = get_directory_snapshot(str(async_local_filesystem_tool.base_path))
         assert dir_snapshot == {"memories/insert_test.txt": "Line 1\nLine 2\nLast Line\n"}
 
+    async def test_view_preserves_crlf_line_endings(
+        self, async_local_filesystem_tool: BetaAsyncLocalFilesystemMemoryTool
+    ) -> None:
+        memory_root = Path(str(async_local_filesystem_tool.memory_root))
+        memory_root.mkdir(parents=True, exist_ok=True)
+        (memory_root / "crlf.txt").write_bytes(b"line1\r\nline2\r\nline3\r\n")
+
+        result = await async_local_filesystem_tool.view(
+            BetaMemoryTool20250818ViewCommand(command="view", path="/memories/crlf.txt")
+        )
+        assert (
+            result
+            == "Here's the content of /memories/crlf.txt with line numbers:\n     1\tline1\r\n     2\tline2\r\n     3\tline3\r\n     4\t"
+        )
+
+    async def test_str_replace_preserves_crlf_line_endings(
+        self, async_local_filesystem_tool: BetaAsyncLocalFilesystemMemoryTool
+    ) -> None:
+        memory_root = Path(str(async_local_filesystem_tool.memory_root))
+        memory_root.mkdir(parents=True, exist_ok=True)
+        path = memory_root / "crlf.txt"
+        path.write_bytes(b"line1\r\nline2\r\nline3\r\n")
+
+        await async_local_filesystem_tool.str_replace(
+            BetaMemoryTool20250818StrReplaceCommand(
+                command="str_replace", path="/memories/crlf.txt", old_str="line2", new_str="LINE2"
+            )
+        )
+        assert path.read_bytes() == b"line1\r\nLINE2\r\nline3\r\n"
+
+    async def test_insert_preserves_crlf_line_endings(
+        self, async_local_filesystem_tool: BetaAsyncLocalFilesystemMemoryTool
+    ) -> None:
+        memory_root = Path(str(async_local_filesystem_tool.memory_root))
+        memory_root.mkdir(parents=True, exist_ok=True)
+        path = memory_root / "crlf.txt"
+        path.write_bytes(b"line1\r\nline2\r\nline3\r\n")
+
+        await async_local_filesystem_tool.insert(
+            BetaMemoryTool20250818InsertCommand(
+                command="insert", path="/memories/crlf.txt", insert_line=1, insert_text="Inserted"
+            )
+        )
+        assert path.read_bytes() == b"line1\r\nInserted\nline2\r\nline3\r\n"
+
     async def test_insert_error_for_non_existent_file(
         self, async_local_filesystem_tool: BetaAsyncLocalFilesystemMemoryTool
     ) -> None:
@@ -944,6 +1065,37 @@ class TestBetaAsyncLocalFilesystemMemoryTool:
                     command="create", file_text="Escape attempt", path="/memories/../../../etc/passwd"
                 )
             )
+
+    async def test_validate_path_returns_resolved_path_not_symlink_target(
+        self, async_local_filesystem_tool: BetaAsyncLocalFilesystemMemoryTool
+    ) -> None:
+        """_validate_path must return the resolved path so that subsequent file
+        operations hit the real location, not the (potentially swappable) symlink.
+
+        Without this fix, an attacker could:
+        1. Create /memories/link -> /memories/legit  (passes validation)
+        2. Swap /memories/link -> /etc between validation and the file operation
+        3. The file operation would follow the new symlink target
+        """
+        memories_path = Path(str(async_local_filesystem_tool.memory_root))
+        memories_path.mkdir(parents=True, exist_ok=True)
+
+        # Create a real directory inside memories and a symlink pointing to it
+        legit_dir = memories_path / "legit"
+        legit_dir.mkdir()
+        (legit_dir / "file.txt").write_text("content", encoding="utf-8")
+
+        link_path = memories_path / "link"
+        os.symlink(legit_dir, link_path, target_is_directory=True)
+
+        # _validate_path should return the resolved real path, not the symlink path
+        result = await async_local_filesystem_tool._validate_path("/memories/link/file.txt")
+        result_str = str(result)
+
+        # The returned path should point to the resolved location (under legit/),
+        # not through the symlink
+        assert "link" not in result_str, f"_validate_path returned unresolved symlink path: {result_str}"
+        assert str(legit_dir.resolve()) in result_str
 
     async def test_symlink_validation_reject_symlink_pointing_outside_memories(
         self, async_local_filesystem_tool: BetaAsyncLocalFilesystemMemoryTool
